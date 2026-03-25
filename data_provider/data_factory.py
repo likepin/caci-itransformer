@@ -48,6 +48,7 @@ def data_provider(args, flag):
     if args.data == 'phasec_synth':
         data_kwargs['phasec_split_path'] = args.phasec_split_path
         data_kwargs['phasec_gating_lambda_path'] = getattr(args, 'phasec_gating_lambda_path', '')
+        data_kwargs['phasec_gating_mode'] = getattr(args, 'phasec_gating_mode', 'none')
 
     data_set = Data(**data_kwargs)
     print(flag, len(data_set))

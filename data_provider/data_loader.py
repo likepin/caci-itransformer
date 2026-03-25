@@ -292,7 +292,7 @@ class Dataset_Custom(Dataset):
 class Dataset_PhaseC_Synthetic(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='X.npy', target='OT', scale=True, timeenc=0, freq='h',
-                 phasec_split_path=None, phasec_gating_lambda_path=None):
+                 phasec_split_path=None, phasec_gating_lambda_path=None, phasec_gating_mode='none'):
         if size is None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
@@ -313,6 +313,7 @@ class Dataset_PhaseC_Synthetic(Dataset):
         self.data_path = data_path
         self.phasec_split_path = phasec_split_path
         self.phasec_gating_lambda_path = phasec_gating_lambda_path
+        self.phasec_gating_mode = phasec_gating_mode
         self.phasec_gating_lambda = None
         self.__read_data__()
 
@@ -352,6 +353,8 @@ class Dataset_PhaseC_Synthetic(Dataset):
     def _load_optional_gating_lambda(self, expected_length):
         lambda_path = self._resolve_optional_artifact_path(self.phasec_gating_lambda_path)
         if not lambda_path:
+            if self.phasec_gating_mode != 'none':
+                raise ValueError('phasec_gating_lambda_path is required when phasec_gating_mode is active')
             return None
         lambda_array = np.load(lambda_path, allow_pickle=True)
         if isinstance(lambda_array, np.lib.npyio.NpzFile):
@@ -438,16 +441,19 @@ class Dataset_PhaseC_Synthetic(Dataset):
         r_end = r_begin + self.label_len + self.pred_len
 
         if self.phasec_gating_lambda is not None:
-            gating_slice = self.phasec_gating_lambda[s_begin:r_end]
+            gating_window = self.phasec_gating_lambda[s_begin:r_end]
             expected_window = self.seq_len + self.pred_len
-            if len(gating_slice) != expected_window:
-                raise ValueError(f'Phase C gating lambda misaligned at start={s_begin}: got {len(gating_slice)}, expected {expected_window}')
+            if len(gating_window) != expected_window:
+                raise ValueError(f'Phase C gating lambda misaligned at start={s_begin}: got {len(gating_window)}, expected {expected_window}')
+            gating_future = self.phasec_gating_lambda[s_end:r_end].astype(np.float32)
+        else:
+            gating_future = np.ones(self.pred_len, dtype=np.float32)
 
         seq_x = self.data_x[s_begin:s_end]
         seq_y = self.data_y[r_begin:r_end]
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
-        return seq_x, seq_y, seq_x_mark, seq_y_mark
+        return seq_x, seq_y, seq_x_mark, seq_y_mark, gating_future
 
     def __len__(self):
         return len(self.window_starts)

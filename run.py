@@ -5,6 +5,18 @@ from experiments.exp_long_term_forecasting_partial import Exp_Long_Term_Forecast
 import random
 import numpy as np
 
+
+def str2bool(value):
+    if isinstance(value, bool):
+        return value
+    value = str(value).strip().lower()
+    if value in {'true', '1', 'yes', 'y'}:
+        return True
+    if value in {'false', '0', 'no', 'n'}:
+        return False
+    raise argparse.ArgumentTypeError(f'Invalid boolean value: {value}')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='iTransformer')
 
@@ -19,7 +31,10 @@ if __name__ == '__main__':
     parser.add_argument('--root_path', type=str, default='./data/electricity/', help='root path of the data file')
     parser.add_argument('--data_path', type=str, default='electricity.csv', help='data csv file')
     parser.add_argument('--phasec_split_path', type=str, default='', help='path to the Phase C split artifact when data=phasec_synth')
-    parser.add_argument('--phasec_gating_lambda_path', type=str, default='', help='optional Phase C gating lambda artifact for no-op read-in validation')
+    parser.add_argument('--phasec_gating_lambda_path', type=str, default='', help='optional Phase C gating lambda artifact for gating-only experiments')
+    parser.add_argument('--phasec_gating_lambda_hash', type=str, default='', help='optional frozen hash for the Phase C gating lambda artifact')
+    parser.add_argument('--phasec_gating_mode', type=str, default='none', choices=['none', 'noop', 'loss_weighting'], help='Phase C gating integration mode')
+    parser.add_argument('--phasec_gating_weight_polarity', type=str, default='inverse', choices=['direct', 'inverse'], help='How gating lambda maps to sample weights when gating mode is active')
     parser.add_argument('--seed', type=int, default=2023, help='global random seed')
     parser.add_argument('--features', type=str, default='M',
                         help='forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, S:univariate predict univariate, MS:multivariate predict univariate')
@@ -67,7 +82,7 @@ if __name__ == '__main__':
     parser.add_argument('--use_amp', action='store_true', help='use automatic mixed precision training', default=False)
 
     # GPU
-    parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
+    parser.add_argument('--use_gpu', type=str2bool, nargs='?', const=True, default=True, help='use gpu')
     parser.add_argument('--gpu', type=int, default=0, help='gpu')
     parser.add_argument('--use_multi_gpu', action='store_true', help='use multiple gpus', default=False)
     parser.add_argument('--devices', type=str, default='0,1,2,3', help='device ids of multile gpus')
@@ -86,6 +101,13 @@ if __name__ == '__main__':
                                                                            'you can select [partial_start_index, min(enc_in + partial_start_index, N)]')
 
     args = parser.parse_args()
+
+    if args.phasec_gating_mode != 'none' and args.data != 'phasec_synth':
+        raise ValueError('Phase C gating modes are only supported when data=phasec_synth')
+    if args.phasec_gating_mode != 'none' and not args.phasec_gating_lambda_path:
+        raise ValueError('phasec_gating_lambda_path is required when phasec_gating_mode is active')
+    if args.phasec_gating_mode == 'none':
+        args.phasec_gating_lambda_hash = ''
 
     random.seed(args.seed)
     np.random.seed(args.seed)

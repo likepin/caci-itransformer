@@ -33,47 +33,119 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         return model_optim
 
     def _select_criterion(self):
-        criterion = nn.MSELoss()
+        criterion = nn.MSELoss(reduction='none')
         return criterion
+
+    @staticmethod
+    def _unpack_batch(batch):
+        if len(batch) == 5:
+            return batch
+        if len(batch) == 4:
+            batch_x, batch_y, batch_x_mark, batch_y_mark = batch
+            return batch_x, batch_y, batch_x_mark, batch_y_mark, None
+        raise ValueError(f'Unexpected batch structure with length {len(batch)}')
+
+    def _phasec_gating_active(self):
+        return self.args.data == 'phasec_synth' and self.args.phasec_gating_mode != 'none'
+
+    def _phasec_should_log(self):
+        return self._phasec_gating_active()
+
+    def _log_phasec_gating_config(self):
+        if not self._phasec_should_log():
+            return
+        polarity_note = {
+            'inverse': 'preserve suppressive gating semantics (weight down when lambda up)',
+            'direct': 'emphasize-high-lambda hypothesis (weight up when lambda up)',
+        }[self.args.phasec_gating_weight_polarity]
+        print('PhaseC gating config:')
+        print(f'  mode={self.args.phasec_gating_mode}')
+        print(f'  polarity={self.args.phasec_gating_weight_polarity} ({polarity_note})')
+        print(f'  gating_artifact_path={self.args.phasec_gating_lambda_path}')
+        print(f'  gating_hash={self.args.phasec_gating_lambda_hash or "(unspecified)"}')
+        print('  weight_normalization=batch_mean_1')
+
+    def _compute_phasec_sample_weights(self, batch_gating, num_samples, device):
+        base = torch.ones(num_samples, device=device)
+        if not self._phasec_gating_active():
+            return base
+        if batch_gating is None:
+            raise ValueError('Phase C gating mode is active but the dataset did not return gating values')
+        gating_future = batch_gating.float().to(device)
+        lambda_mean = gating_future.mean(dim=1)
+        if self.args.phasec_gating_mode == 'noop':
+            return base
+        if self.args.phasec_gating_mode != 'loss_weighting':
+            raise ValueError(f'Unsupported phasec_gating_mode: {self.args.phasec_gating_mode}')
+        if self.args.phasec_gating_weight_polarity == 'inverse':
+            weights_raw = 1.0 - lambda_mean
+        elif self.args.phasec_gating_weight_polarity == 'direct':
+            weights_raw = lambda_mean
+        else:
+            raise ValueError(f'Unsupported phasec_gating_weight_polarity: {self.args.phasec_gating_weight_polarity}')
+        denom = torch.clamp(weights_raw.mean().detach(), min=1e-8)
+        return weights_raw / denom
+
+    @staticmethod
+    def _summarize_weight_array(weight_values):
+        flat = np.concatenate(weight_values).astype(np.float64)
+        summary = {
+            'weight_mean': float(np.mean(flat)),
+            'weight_std': float(np.std(flat)),
+            'weight_min': float(np.min(flat)),
+            'weight_max': float(np.max(flat)),
+            'weight_p10': float(np.percentile(flat, 10)),
+            'weight_p50': float(np.percentile(flat, 50)),
+            'weight_p90': float(np.percentile(flat, 90)),
+        }
+        return summary
+
+    def _log_weight_summary(self, epoch, weight_values):
+        if not weight_values or not self._phasec_should_log():
+            return
+        summary = self._summarize_weight_array(weight_values)
+        summary_str = ', '.join(f'{key}={value:.6f}' for key, value in summary.items())
+        print(f'Epoch {epoch} gating weight summary | {summary_str}')
+
+    def _forward_batch(self, batch_x, batch_y, batch_x_mark, batch_y_mark):
+        if 'PEMS' in self.args.data or 'Solar' in self.args.data:
+            batch_x_mark = None
+            batch_y_mark = None
+        else:
+            batch_x_mark = batch_x_mark.float().to(self.device)
+            batch_y_mark = batch_y_mark.float().to(self.device)
+
+        dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
+        dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
+
+        if self.args.output_attention:
+            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+        else:
+            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+
+        f_dim = -1 if self.args.features == 'MS' else 0
+        outputs = outputs[:, -self.args.pred_len:, f_dim:]
+        batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+        return outputs, batch_y
 
     def vali(self, vali_data, vali_loader, criterion):
         total_loss = []
         self.model.eval()
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(vali_loader):
+            for batch in vali_loader:
+                batch_x, batch_y, batch_x_mark, batch_y_mark, _ = self._unpack_batch(batch)
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
-                if 'PEMS' in self.args.data or 'Solar' in self.args.data:
-                    batch_x_mark = None
-                    batch_y_mark = None
-                else:
-                    batch_x_mark = batch_x_mark.float().to(self.device)
-                    batch_y_mark = batch_y_mark.float().to(self.device)
 
-                # decoder input
-                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
-                # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        if self.args.output_attention:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                        else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark)
                 else:
-                    if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                    else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                f_dim = -1 if self.args.features == 'MS' else 0
-                outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                    outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark)
 
                 pred = outputs.detach().cpu()
                 true = batch_y.detach().cpu()
-
-                loss = criterion(pred, true)
-
+                loss = criterion(pred, true).mean().item()
                 total_loss.append(loss)
         total_loss = np.average(total_loss)
         self.model.train()
@@ -95,6 +167,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
+        self._log_phasec_gating_config()
 
         if self.args.use_amp:
             scaler = torch.cuda.amp.GradScaler()
@@ -102,55 +175,40 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
+            epoch_weight_values = []
 
             self.model.train()
             epoch_time = time.time()
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
+            for i, batch in enumerate(train_loader):
+                batch_x, batch_y, batch_x_mark, batch_y_mark, batch_gating = self._unpack_batch(batch)
                 iter_count += 1
                 model_optim.zero_grad()
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
-                if 'PEMS' in self.args.data or 'Solar' in self.args.data:
-                    batch_x_mark = None
-                    batch_y_mark = None
-                else:
-                    batch_x_mark = batch_x_mark.float().to(self.device)
-                    batch_y_mark = batch_y_mark.float().to(self.device)
 
-                # decoder input
-                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
-
-                # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        if self.args.output_attention:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                        else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-
-                        f_dim = -1 if self.args.features == 'MS' else 0
-                        outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                        batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                        loss = criterion(outputs, batch_y)
-                        train_loss.append(loss.item())
+                        outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark)
+                        loss_raw = criterion(outputs, batch_y)
+                        loss_per_sample = loss_raw.mean(dim=(1, 2))
+                        sample_weights = self._compute_phasec_sample_weights(batch_gating, loss_per_sample.shape[0], loss_per_sample.device)
+                        loss = (loss_per_sample * sample_weights).mean()
                 else:
-                    if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                    else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark)
+                    loss_raw = criterion(outputs, batch_y)
+                    loss_per_sample = loss_raw.mean(dim=(1, 2))
+                    sample_weights = self._compute_phasec_sample_weights(batch_gating, loss_per_sample.shape[0], loss_per_sample.device)
+                    loss = (loss_per_sample * sample_weights).mean()
 
-                    f_dim = -1 if self.args.features == 'MS' else 0
-                    outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                    batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-                    loss = criterion(outputs, batch_y)
-                    train_loss.append(loss.item())
+                train_loss.append(loss.item())
+                if self._phasec_should_log():
+                    epoch_weight_values.append(sample_weights.detach().cpu().numpy())
 
                 if (i + 1) % 100 == 0:
-                    print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
+                    print("	iters: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
                     speed = (time.time() - time_now) / iter_count
                     left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
-                    print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
+                    print('	speed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
                     iter_count = 0
                     time_now = time.time()
 
@@ -163,6 +221,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     model_optim.step()
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
+            self._log_weight_summary(epoch + 1, epoch_weight_values)
             train_loss = np.average(train_loss)
             vali_loss = self.vali(vali_data, vali_loader, criterion)
             test_loss = self.vali(test_data, test_loader, criterion)
@@ -175,8 +234,6 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 break
 
             adjust_learning_rate(model_optim, epoch + 1, self.args)
-
-            # get_cka(self.args, setting, self.model, train_loader, self.device, epoch)
 
         best_model_path = path + '/' + 'checkpoint.pth'
         self.model.load_state_dict(torch.load(best_model_path))
@@ -197,37 +254,17 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         self.model.eval()
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(test_loader):
+            for batch in test_loader:
+                batch_x, batch_y, batch_x_mark, batch_y_mark, _ = self._unpack_batch(batch)
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
 
-                if 'PEMS' in self.args.data or 'Solar' in self.args.data:
-                    batch_x_mark = None
-                    batch_y_mark = None
-                else:
-                    batch_x_mark = batch_x_mark.float().to(self.device)
-                    batch_y_mark = batch_y_mark.float().to(self.device)
-
-                # decoder input
-                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
-                # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        if self.args.output_attention:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
-                        else:
-                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark)
                 else:
-                    if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                    outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark)
 
-                    else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-
-                f_dim = -1 if self.args.features == 'MS' else 0
-                outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
                 outputs = outputs.detach().cpu().numpy()
                 batch_y = batch_y.detach().cpu().numpy()
                 if test_data.scale and self.args.inverse:
@@ -240,17 +277,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 preds.append(pred)
                 trues.append(true)
-                if i % 20 == 0:
-                    input = batch_x.detach().cpu().numpy()
+                if len(preds) % 20 == 1:
+                    input_arr = batch_x.detach().cpu().numpy()
                     if test_data.scale and self.args.inverse:
-                        shape = input.shape
-                        input = test_data.inverse_transform(input.squeeze(0)).reshape(shape)
-                    gt = np.concatenate((input[0, :, -1], true[0, :, -1]), axis=0)
-                    pd = np.concatenate((input[0, :, -1], pred[0, :, -1]), axis=0)
-                    visual(gt, pd, os.path.join(folder_path, str(i) + '.pdf'))
-                
-              
-
+                        shape = input_arr.shape
+                        input_arr = test_data.inverse_transform(input_arr.squeeze(0)).reshape(shape)
+                    gt = np.concatenate((input_arr[0, :, -1], true[0, :, -1]), axis=0)
+                    pd = np.concatenate((input_arr[0, :, -1], pred[0, :, -1]), axis=0)
+                    visual(gt, pd, os.path.join(folder_path, str(len(preds) - 1) + '.pdf'))
 
         preds = np.array(preds)
         trues = np.array(trues)
@@ -259,26 +293,22 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
         print('test shape:', preds.shape, trues.shape)
 
-        # result save
         folder_path = './results/' + setting + '/'
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
         mae, mse, rmse, mape, mspe = metric(preds, trues)
         print('mse:{}, mae:{}'.format(mse, mae))
-        f = open("result_long_term_forecast.txt", 'a')
-        f.write(setting + "  \n")
-        f.write('mse:{}, mae:{}'.format(mse, mae))
-        f.write('\n')
-        f.write('\n')
-        f.close()
+        with open('result_long_term_forecast.txt', 'a') as f:
+            f.write(setting + '  \n')
+            f.write('mse:{}, mae:{}'.format(mse, mae))
+            f.write('\n\n')
 
         np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
         np.save(folder_path + 'pred.npy', preds)
         np.save(folder_path + 'true.npy', trues)
 
         return
-
 
     def predict(self, setting, load=False):
         pred_data, pred_loader = self._get_data(flag='pred')
@@ -292,16 +322,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         self.model.eval()
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(pred_loader):
+            for batch_x, batch_y, batch_x_mark, batch_y_mark in pred_loader:
                 batch_x = batch_x.float().to(self.device)
-                batch_y = batch_y.float().to(self.device)
+                batch_y = batch_y.float()
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
-                # decoder input
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
-                # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         if self.args.output_attention:
@@ -313,16 +341,12 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                     else:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                outputs = outputs.detach().cpu().numpy()
-                if pred_data.scale and self.args.inverse:
-                    shape = outputs.shape
-                    outputs = pred_data.inverse_transform(outputs.squeeze(0)).reshape(shape)
-                preds.append(outputs)
+                pred = outputs.detach().cpu().numpy()
+                preds.append(pred)
 
         preds = np.array(preds)
         preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
 
-        # result save
         folder_path = './results/' + setting + '/'
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
