@@ -63,7 +63,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         print(f'  polarity={self.args.phasec_gating_weight_polarity} ({polarity_note})')
         print(f'  gating_artifact_path={self.args.phasec_gating_lambda_path}')
         print(f'  gating_hash={self.args.phasec_gating_lambda_hash or "(unspecified)"}')
-        print('  weight_normalization=batch_mean_1')
+        print(f'  weight_normalization=batch_mean_1_then_alpha_shrink(alpha={self.args.phasec_gating_alpha})')
 
     def _compute_phasec_sample_weights(self, batch_gating, num_samples, device):
         base = torch.ones(num_samples, device=device)
@@ -84,7 +84,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         else:
             raise ValueError(f'Unsupported phasec_gating_weight_polarity: {self.args.phasec_gating_weight_polarity}')
         denom = torch.clamp(weights_raw.mean().detach(), min=1e-8)
-        return weights_raw / denom
+        weights_norm = weights_raw / denom
+        alpha = float(self.args.phasec_gating_alpha)
+        return 1.0 + alpha * (weights_norm - 1.0)
 
     @staticmethod
     def _summarize_weight_array(weight_values):
