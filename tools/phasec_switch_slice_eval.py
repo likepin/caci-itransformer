@@ -29,18 +29,12 @@ class SliceWindowDataset(Dataset):
 
     def __getitem__(self, index):
         s_begin = int(self.starts[index])
-        s_end = s_begin + self.seq_len
-        r_begin = s_end - self.label_len
-        r_end = r_begin + self.label_len + self.pred_len
-        seq_x = self.base.data_x[s_begin:s_end]
-        seq_y = self.base.data_y[r_begin:r_end]
-        seq_x_mark = self.base.data_stamp[s_begin:s_end]
-        seq_y_mark = self.base.data_stamp[r_begin:r_end]
-        times = np.arange(s_end, r_end, dtype=np.int64)
+        seq_x, seq_y, seq_x_mark, seq_y_mark, _ = self.base._slice_sample_by_start(s_begin)
+        times = np.arange(s_begin + self.seq_len, s_begin + self.seq_len + self.pred_len, dtype=np.int64)
         return seq_x, seq_y, seq_x_mark, seq_y_mark, times
 
 
-def build_args(train_cfg_path, split_artifact_path, root_path, data_path, use_gpu):
+def build_args(train_cfg_path, split_artifact_path, root_path, data_path, use_gpu, phasec_regime_lambda_path='', phasec_regime_lambda_hash='', phasec_regime_mode='none'):
     cfg = json.loads(Path(train_cfg_path).read_text(encoding='utf-8'))
     frozen = cfg['frozen_round1_training_config']
     return SimpleNamespace(
@@ -100,6 +94,9 @@ def build_args(train_cfg_path, split_artifact_path, root_path, data_path, use_gp
         phasec_gating_mode='none',
         phasec_gating_weight_polarity='direct',
         phasec_gating_alpha=1.0,
+        phasec_regime_lambda_path=phasec_regime_lambda_path,
+        phasec_regime_lambda_hash=phasec_regime_lambda_hash,
+        phasec_regime_mode=phasec_regime_mode,
     )
 
 
@@ -147,6 +144,9 @@ def main():
     parser.add_argument('--results-dir', required=True)
     parser.add_argument('--variant-name', default='')
     parser.add_argument('--use-gpu', default='true')
+    parser.add_argument('--phasec-regime-lambda-path', default='')
+    parser.add_argument('--phasec-regime-lambda-hash', default='')
+    parser.add_argument('--phasec-regime-mode', default='none', choices=['none', 'noop', 'extra_time_feature'])
     args = parser.parse_args()
 
     use_gpu = str(args.use_gpu).strip().lower() in {'true', '1', 'yes', 'y'}
@@ -156,7 +156,7 @@ def main():
     switch_pre = [split['switch_window']['pre_slice']]
     switch_post = [split['switch_window']['post_slice']]
 
-    model_args = build_args(args.train_config, args.split_artifact, args.root_path, args.data_path, use_gpu)
+    model_args = build_args(args.train_config, args.split_artifact, args.root_path, args.data_path, use_gpu, args.phasec_regime_lambda_path, args.phasec_regime_lambda_hash, args.phasec_regime_mode)
     exp = Exp_Long_Term_Forecast(model_args)
 
     checkpoint_file = Path(args.checkpoint_dir) / 'checkpoint.pth'
@@ -177,6 +177,8 @@ def main():
         phasec_split_path=args.split_artifact,
         phasec_gating_lambda_path='',
         phasec_gating_mode='none',
+        phasec_regime_lambda_path=args.phasec_regime_lambda_path,
+        phasec_regime_mode=args.phasec_regime_mode,
     )
 
     starts = overlapping_starts(len(base_dataset.data_x), base_dataset.seq_len, base_dataset.pred_len, switch_intervals)

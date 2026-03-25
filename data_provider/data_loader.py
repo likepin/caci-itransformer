@@ -292,7 +292,8 @@ class Dataset_Custom(Dataset):
 class Dataset_PhaseC_Synthetic(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='X.npy', target='OT', scale=True, timeenc=0, freq='h',
-                 phasec_split_path=None, phasec_gating_lambda_path=None, phasec_gating_mode='none'):
+                 phasec_split_path=None, phasec_gating_lambda_path=None, phasec_gating_mode='none',
+                 phasec_regime_lambda_path=None, phasec_regime_mode='none'):
         if size is None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
@@ -315,6 +316,9 @@ class Dataset_PhaseC_Synthetic(Dataset):
         self.phasec_gating_lambda_path = phasec_gating_lambda_path
         self.phasec_gating_mode = phasec_gating_mode
         self.phasec_gating_lambda = None
+        self.phasec_regime_lambda_path = phasec_regime_lambda_path
+        self.phasec_regime_mode = phasec_regime_mode
+        self.phasec_regime_lambda = None
         self.__read_data__()
 
     def _resolve_split_path(self):
@@ -350,12 +354,34 @@ class Dataset_PhaseC_Synthetic(Dataset):
             raise ValueError('No rows available for the requested intervals')
         return np.concatenate(slices, axis=0)
 
-    def _load_optional_gating_lambda(self, expected_length):
-        lambda_path = self._resolve_optional_artifact_path(self.phasec_gating_lambda_path)
+    @staticmethod
+    def _sanitize_optional_lambda(lambda_array, label, lambda_path):
+        if np.isinf(lambda_array).any():
+            raise ValueError(f'Phase C {label} lambda contains Inf values: {lambda_path}')
+        nan_mask = np.isnan(lambda_array)
+        nan_count = int(nan_mask.sum())
+        if nan_count == 0:
+            return lambda_array
+        valid_idx = np.where(~nan_mask)[0]
+        if len(valid_idx) == 0:
+            raise ValueError(f'Phase C {label} lambda is entirely NaN: {lambda_path}')
+        filled = np.interp(
+            np.arange(len(lambda_array), dtype=np.float64),
+            valid_idx.astype(np.float64),
+            lambda_array[valid_idx].astype(np.float64),
+        ).astype(np.float32)
+        print(
+            f'PhaseC {label} lambda sanitization: filled {nan_count} NaNs via linear interpolation '
+            f'with edge-value extrapolation from {lambda_path}'
+        )
+        return filled
+
+    def _load_optional_lambda(self, artifact_path, mode, expected_length, label):
+        lambda_path = self._resolve_optional_artifact_path(artifact_path)
         if not lambda_path:
-            if self.phasec_gating_mode != 'none':
-                raise ValueError('phasec_gating_lambda_path is required when phasec_gating_mode is active')
-            return None
+            if mode != 'none':
+                raise ValueError(f'phasec_{label}_lambda_path is required when phasec_{label}_mode is active')
+            return None, ''
         lambda_array = np.load(lambda_path, allow_pickle=True)
         if isinstance(lambda_array, np.lib.npyio.NpzFile):
             if 'lambda_t' in lambda_array.files:
@@ -366,9 +392,9 @@ class Dataset_PhaseC_Synthetic(Dataset):
                 raise ValueError('Expected lambda npz with lambda_t or arr_0')
         lambda_array = np.asarray(lambda_array).reshape(-1)
         if len(lambda_array) != expected_length:
-            raise ValueError(f'Gating lambda length {len(lambda_array)} does not match data length {expected_length}')
-        self.phasec_gating_lambda_path = lambda_path
-        return lambda_array
+            raise ValueError(f'{label.capitalize()} lambda length {len(lambda_array)} does not match data length {expected_length}')
+        lambda_array = self._sanitize_optional_lambda(lambda_array, label, lambda_path)
+        return lambda_array, lambda_path
 
     def _build_valid_starts(self, intervals):
         starts = []
@@ -401,7 +427,12 @@ class Dataset_PhaseC_Synthetic(Dataset):
         expected_length = split_artifact['indexing']['length']
         if len(raw_data) != expected_length:
             raise ValueError(f'Phase C split length {expected_length} does not match data length {len(raw_data)}')
-        self.phasec_gating_lambda = self._load_optional_gating_lambda(expected_length)
+        self.phasec_gating_lambda, self.phasec_gating_lambda_path = self._load_optional_lambda(
+            self.phasec_gating_lambda_path, self.phasec_gating_mode, expected_length, 'gating'
+        )
+        self.phasec_regime_lambda, self.phasec_regime_lambda_path = self._load_optional_lambda(
+            self.phasec_regime_lambda_path, self.phasec_regime_mode, expected_length, 'regime'
+        )
 
         if self.features in ['M', 'MS']:
             model_data = raw_data
@@ -433,9 +464,12 @@ class Dataset_PhaseC_Synthetic(Dataset):
         if self.phasec_gating_lambda is not None:
             print(f'PhaseC gating lambda artifact ({self.flag}): {self.phasec_gating_lambda_path}')
             print(f'PhaseC gating lambda length ({self.flag}): {len(self.phasec_gating_lambda)}')
+        if self.phasec_regime_lambda is not None:
+            print(f'PhaseC regime lambda artifact ({self.flag}): {self.phasec_regime_lambda_path}')
+            print(f'PhaseC regime lambda length ({self.flag}): {len(self.phasec_regime_lambda)}')
 
-    def __getitem__(self, index):
-        s_begin = int(self.window_starts[index])
+    def _slice_sample_by_start(self, s_begin):
+        s_begin = int(s_begin)
         s_end = s_begin + self.seq_len
         r_begin = s_end - self.label_len
         r_end = r_begin + self.label_len + self.pred_len
@@ -453,7 +487,25 @@ class Dataset_PhaseC_Synthetic(Dataset):
         seq_y = self.data_y[r_begin:r_end]
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
+
+        if self.phasec_regime_lambda is not None:
+            regime_x = self.phasec_regime_lambda[s_begin:s_end]
+            regime_y = self.phasec_regime_lambda[r_begin:r_end]
+            if len(regime_x) != self.seq_len:
+                raise ValueError(f'Phase C regime lambda misaligned for encoder at start={s_begin}: got {len(regime_x)}, expected {self.seq_len}')
+            expected_decoder = self.label_len + self.pred_len
+            if len(regime_y) != expected_decoder:
+                raise ValueError(f'Phase C regime lambda misaligned for decoder at start={s_begin}: got {len(regime_y)}, expected {expected_decoder}')
+            if self.phasec_regime_mode == 'extra_time_feature':
+                regime_x = regime_x.astype(np.float32)[:, None]
+                regime_y = regime_y.astype(np.float32)[:, None]
+                seq_x_mark = np.concatenate([seq_x_mark.astype(np.float32), regime_x], axis=1)
+                seq_y_mark = np.concatenate([seq_y_mark.astype(np.float32), regime_y], axis=1)
+
         return seq_x, seq_y, seq_x_mark, seq_y_mark, gating_future
+
+    def __getitem__(self, index):
+        return self._slice_sample_by_start(self.window_starts[index])
 
     def __len__(self):
         return len(self.window_starts)

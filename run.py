@@ -36,6 +36,9 @@ if __name__ == '__main__':
     parser.add_argument('--phasec_gating_mode', type=str, default='none', choices=['none', 'noop', 'loss_weighting'], help='Phase C gating integration mode')
     parser.add_argument('--phasec_gating_weight_polarity', type=str, default='inverse', choices=['direct', 'inverse'], help='How gating lambda maps to sample weights when gating mode is active')
     parser.add_argument('--phasec_gating_alpha', type=float, default=1.0, help='strength shrink for gating weights after mean-1 normalization; 1.0 keeps full weighting, 0.0 collapses to baseline')
+    parser.add_argument('--phasec_regime_lambda_path', type=str, default='', help='optional Phase C regime lambda artifact for regime-only experiments')
+    parser.add_argument('--phasec_regime_lambda_hash', type=str, default='', help='optional frozen hash for the Phase C regime lambda artifact')
+    parser.add_argument('--phasec_regime_mode', type=str, default='none', choices=['none', 'noop', 'extra_time_feature'], help='Phase C regime integration mode')
     parser.add_argument('--seed', type=int, default=2023, help='global random seed')
     parser.add_argument('--features', type=str, default='M',
                         help='forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, S:univariate predict univariate, MS:multivariate predict univariate')
@@ -111,6 +114,12 @@ if __name__ == '__main__':
         args.phasec_gating_lambda_hash = ''
     if not (0.0 <= args.phasec_gating_alpha <= 1.0):
         raise ValueError('phasec_gating_alpha must be in [0, 1]')
+    if args.phasec_regime_mode != 'none' and args.data != 'phasec_synth':
+        raise ValueError('Phase C regime modes are only supported when data=phasec_synth')
+    if args.phasec_regime_mode != 'none' and not args.phasec_regime_lambda_path:
+        raise ValueError('phasec_regime_lambda_path is required when phasec_regime_mode is active')
+    if args.phasec_regime_mode == 'none':
+        args.phasec_regime_lambda_hash = ''
 
     random.seed(args.seed)
     np.random.seed(args.seed)
