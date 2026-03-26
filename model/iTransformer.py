@@ -22,6 +22,10 @@ class Model(nn.Module):
         self.enc_embedding = DataEmbedding_inverted(configs.seq_len, configs.d_model, configs.embed, configs.freq,
                                                     configs.dropout)
         self.class_strategy = configs.class_strategy
+        self.phasec_regime_mode = getattr(configs, 'phasec_regime_mode', 'none')
+        if self.phasec_regime_mode == 'light_aux_input':
+            self.regime_aux_enc_embedding = nn.Linear(configs.seq_len, configs.d_model)
+            self.regime_aux_dec_embedding = nn.Linear(configs.label_len + configs.pred_len, configs.d_model)
         # Encoder-only architecture
         self.encoder = Encoder(
             [
@@ -39,7 +43,7 @@ class Model(nn.Module):
         )
         self.projector = nn.Linear(configs.d_model, configs.pred_len, bias=True)
 
-    def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
+    def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec, regime_aux_enc=None, regime_aux_dec=None):
         if self.use_norm:
             # Normalization from Non-stationary Transformer
             means = x_enc.mean(1, keepdim=True).detach()
@@ -55,6 +59,12 @@ class Model(nn.Module):
         # Embedding
         # B L N -> B N E                (B L N -> B L E in the vanilla Transformer)
         enc_out = self.enc_embedding(x_enc, x_mark_enc) # covariates (e.g timestamp) can be also embedded as tokens
+        if self.phasec_regime_mode == 'light_aux_input':
+            if regime_aux_enc is None or regime_aux_dec is None:
+                raise ValueError('Phase C regime light_aux_input requires both encoder and decoder auxiliary regime tensors')
+            aux_enc = self.regime_aux_enc_embedding(regime_aux_enc.permute(0, 2, 1).float())
+            aux_dec = self.regime_aux_dec_embedding(regime_aux_dec.permute(0, 2, 1).float())
+            enc_out = torch.cat([enc_out, aux_enc, aux_dec], dim=1)
         
         # B N E -> B N E                (B L E -> B L E in the vanilla Transformer)
         # the dimensions of embedded time series has been inverted, and then processed by native attn, layernorm and ffn modules
@@ -71,8 +81,8 @@ class Model(nn.Module):
         return dec_out, attns
 
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask=None):
-        dec_out, attns = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec)
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, regime_aux_enc=None, regime_aux_dec=None, mask=None):
+        dec_out, attns = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, regime_aux_enc=regime_aux_enc, regime_aux_dec=regime_aux_dec)
         
         if self.output_attention:
             return dec_out[:, -self.pred_len:, :], attns

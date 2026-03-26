@@ -488,6 +488,8 @@ class Dataset_PhaseC_Synthetic(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
+        regime_x_aux = np.zeros((self.seq_len, 1), dtype=np.float32)
+        regime_y_aux = np.zeros((self.label_len + self.pred_len, 1), dtype=np.float32)
         if self.phasec_regime_lambda is not None:
             regime_x = self.phasec_regime_lambda[s_begin:s_end]
             regime_y = self.phasec_regime_lambda[r_begin:r_end]
@@ -496,13 +498,13 @@ class Dataset_PhaseC_Synthetic(Dataset):
             expected_decoder = self.label_len + self.pred_len
             if len(regime_y) != expected_decoder:
                 raise ValueError(f'Phase C regime lambda misaligned for decoder at start={s_begin}: got {len(regime_y)}, expected {expected_decoder}')
+            regime_x_aux = regime_x.astype(np.float32)[:, None]
+            regime_y_aux = regime_y.astype(np.float32)[:, None]
             if self.phasec_regime_mode == 'extra_time_feature':
-                regime_x = regime_x.astype(np.float32)[:, None]
-                regime_y = regime_y.astype(np.float32)[:, None]
-                seq_x_mark = np.concatenate([seq_x_mark.astype(np.float32), regime_x], axis=1)
-                seq_y_mark = np.concatenate([seq_y_mark.astype(np.float32), regime_y], axis=1)
+                seq_x_mark = np.concatenate([seq_x_mark.astype(np.float32), regime_x_aux], axis=1)
+                seq_y_mark = np.concatenate([seq_y_mark.astype(np.float32), regime_y_aux], axis=1)
 
-        return seq_x, seq_y, seq_x_mark, seq_y_mark, gating_future
+        return seq_x, seq_y, seq_x_mark, seq_y_mark, gating_future, regime_x_aux, regime_y_aux
 
     def __getitem__(self, index):
         return self._slice_sample_by_start(self.window_starts[index])

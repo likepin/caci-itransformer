@@ -29,9 +29,9 @@ class SliceWindowDataset(Dataset):
 
     def __getitem__(self, index):
         s_begin = int(self.starts[index])
-        seq_x, seq_y, seq_x_mark, seq_y_mark, _ = self.base._slice_sample_by_start(s_begin)
+        seq_x, seq_y, seq_x_mark, seq_y_mark, _, regime_x_aux, regime_y_aux = self.base._slice_sample_by_start(s_begin)
         times = np.arange(s_begin + self.seq_len, s_begin + self.seq_len + self.pred_len, dtype=np.int64)
-        return seq_x, seq_y, seq_x_mark, seq_y_mark, times
+        return seq_x, seq_y, seq_x_mark, seq_y_mark, regime_x_aux, regime_y_aux, times
 
 
 def build_args(train_cfg_path, split_artifact_path, root_path, data_path, use_gpu, phasec_regime_lambda_path='', phasec_regime_lambda_hash='', phasec_regime_mode='none'):
@@ -146,7 +146,7 @@ def main():
     parser.add_argument('--use-gpu', default='true')
     parser.add_argument('--phasec-regime-lambda-path', default='')
     parser.add_argument('--phasec-regime-lambda-hash', default='')
-    parser.add_argument('--phasec-regime-mode', default='none', choices=['none', 'noop', 'extra_time_feature'])
+    parser.add_argument('--phasec-regime-mode', default='none', choices=['none', 'noop', 'extra_time_feature', 'light_aux_input'])
     args = parser.parse_args()
 
     use_gpu = str(args.use_gpu).strip().lower() in {'true', '1', 'yes', 'y'}
@@ -192,10 +192,10 @@ def main():
     trues = []
     times_all = []
     with torch.no_grad():
-        for batch_x, batch_y, batch_x_mark, batch_y_mark, batch_times in slice_loader:
+        for batch_x, batch_y, batch_x_mark, batch_y_mark, regime_x_aux, regime_y_aux, batch_times in slice_loader:
             batch_x = batch_x.float().to(exp.device)
             batch_y = batch_y.float().to(exp.device)
-            outputs, batch_y = exp._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark)
+            outputs, batch_y = exp._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark, batch_regime_x_aux=regime_x_aux, batch_regime_y_aux=regime_y_aux)
             preds.append(outputs.detach().cpu().numpy())
             trues.append(batch_y.detach().cpu().numpy())
             times_all.append(batch_times.detach().cpu().numpy())

@@ -38,11 +38,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
     @staticmethod
     def _unpack_batch(batch):
-        if len(batch) == 5:
+        if len(batch) == 7:
             return batch
+        if len(batch) == 5:
+            batch_x, batch_y, batch_x_mark, batch_y_mark, batch_gating = batch
+            return batch_x, batch_y, batch_x_mark, batch_y_mark, batch_gating, None, None
         if len(batch) == 4:
             batch_x, batch_y, batch_x_mark, batch_y_mark = batch
-            return batch_x, batch_y, batch_x_mark, batch_y_mark, None
+            return batch_x, batch_y, batch_x_mark, batch_y_mark, None, None, None
         raise ValueError(f'Unexpected batch structure with length {len(batch)}')
 
     def _phasec_gating_active(self):
@@ -109,7 +112,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         summary_str = ', '.join(f'{key}={value:.6f}' for key, value in summary.items())
         print(f'Epoch {epoch} gating weight summary | {summary_str}')
 
-    def _forward_batch(self, batch_x, batch_y, batch_x_mark, batch_y_mark):
+    def _forward_batch(self, batch_x, batch_y, batch_x_mark, batch_y_mark, batch_regime_x_aux=None, batch_regime_y_aux=None):
         if 'PEMS' in self.args.data or 'Solar' in self.args.data:
             batch_x_mark = None
             batch_y_mark = None
@@ -117,13 +120,18 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             batch_x_mark = batch_x_mark.float().to(self.device)
             batch_y_mark = batch_y_mark.float().to(self.device)
 
+        if batch_regime_x_aux is not None:
+            batch_regime_x_aux = batch_regime_x_aux.float().to(self.device)
+        if batch_regime_y_aux is not None:
+            batch_regime_y_aux = batch_regime_y_aux.float().to(self.device)
+
         dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
         dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
         if self.args.output_attention:
-            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, regime_aux_enc=batch_regime_x_aux, regime_aux_dec=batch_regime_y_aux)[0]
         else:
-            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, regime_aux_enc=batch_regime_x_aux, regime_aux_dec=batch_regime_y_aux)
 
         f_dim = -1 if self.args.features == 'MS' else 0
         outputs = outputs[:, -self.args.pred_len:, f_dim:]
@@ -135,15 +143,15 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         self.model.eval()
         with torch.no_grad():
             for batch in vali_loader:
-                batch_x, batch_y, batch_x_mark, batch_y_mark, _ = self._unpack_batch(batch)
+                batch_x, batch_y, batch_x_mark, batch_y_mark, _, batch_regime_x_aux, batch_regime_y_aux = self._unpack_batch(batch)
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
 
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark)
+                        outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark, batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux)
                 else:
-                    outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark)
+                    outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark, batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux)
 
                 pred = outputs.detach().cpu()
                 true = batch_y.detach().cpu()
@@ -182,7 +190,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             self.model.train()
             epoch_time = time.time()
             for i, batch in enumerate(train_loader):
-                batch_x, batch_y, batch_x_mark, batch_y_mark, batch_gating = self._unpack_batch(batch)
+                batch_x, batch_y, batch_x_mark, batch_y_mark, batch_gating, batch_regime_x_aux, batch_regime_y_aux = self._unpack_batch(batch)
                 iter_count += 1
                 model_optim.zero_grad()
                 batch_x = batch_x.float().to(self.device)
@@ -190,13 +198,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark)
+                        outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark, batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux)
                         loss_raw = criterion(outputs, batch_y)
                         loss_per_sample = loss_raw.mean(dim=(1, 2))
                         sample_weights = self._compute_phasec_sample_weights(batch_gating, loss_per_sample.shape[0], loss_per_sample.device)
                         loss = (loss_per_sample * sample_weights).mean()
                 else:
-                    outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark)
+                    outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark, batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux)
                     loss_raw = criterion(outputs, batch_y)
                     loss_per_sample = loss_raw.mean(dim=(1, 2))
                     sample_weights = self._compute_phasec_sample_weights(batch_gating, loss_per_sample.shape[0], loss_per_sample.device)
@@ -257,15 +265,15 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         self.model.eval()
         with torch.no_grad():
             for batch in test_loader:
-                batch_x, batch_y, batch_x_mark, batch_y_mark, _ = self._unpack_batch(batch)
+                batch_x, batch_y, batch_x_mark, batch_y_mark, _, batch_regime_x_aux, batch_regime_y_aux = self._unpack_batch(batch)
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
 
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark)
+                        outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark, batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux)
                 else:
-                    outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark)
+                    outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark, batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux)
 
                 outputs = outputs.detach().cpu().numpy()
                 batch_y = batch_y.detach().cpu().numpy()

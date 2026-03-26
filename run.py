@@ -38,7 +38,7 @@ if __name__ == '__main__':
     parser.add_argument('--phasec_gating_alpha', type=float, default=1.0, help='strength shrink for gating weights after mean-1 normalization; 1.0 keeps full weighting, 0.0 collapses to baseline')
     parser.add_argument('--phasec_regime_lambda_path', type=str, default='', help='optional Phase C regime lambda artifact for regime-only experiments')
     parser.add_argument('--phasec_regime_lambda_hash', type=str, default='', help='optional frozen hash for the Phase C regime lambda artifact')
-    parser.add_argument('--phasec_regime_mode', type=str, default='none', choices=['none', 'noop', 'extra_time_feature'], help='Phase C regime integration mode')
+    parser.add_argument('--phasec_regime_mode', type=str, default='none', choices=['none', 'noop', 'extra_time_feature', 'light_aux_input'], help='Phase C regime integration mode')
     parser.add_argument('--seed', type=int, default=2023, help='global random seed')
     parser.add_argument('--features', type=str, default='M',
                         help='forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, S:univariate predict univariate, MS:multivariate predict univariate')
