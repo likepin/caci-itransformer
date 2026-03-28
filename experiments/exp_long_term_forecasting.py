@@ -51,6 +51,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
     def _phasec_gating_active(self):
         return self.args.data == 'phasec_synth' and self.args.phasec_gating_mode != 'none'
 
+    def _phasec_regime_active(self):
+        return self.args.data == 'phasec_synth' and self.args.phasec_regime_mode != 'none'
+
     def _phasec_should_log(self):
         return self._phasec_gating_active()
 
@@ -67,6 +70,29 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         print(f'  gating_artifact_path={self.args.phasec_gating_lambda_path}')
         print(f'  gating_hash={self.args.phasec_gating_lambda_hash or "(unspecified)"}')
         print(f'  weight_normalization=batch_mean_1_then_alpha_shrink(alpha={self.args.phasec_gating_alpha})')
+
+    def _phasec_regime_route_effective(self):
+        mode = getattr(self.args, 'phasec_regime_mode', 'none')
+        if mode == 'none':
+            return 'off'
+        if mode == 'light_aux_input':
+            scope = getattr(self.args, 'phasec_regime_scope', 'global')
+            if scope == 'global':
+                return 'enc_and_dec'
+            if scope == 'decoder_only':
+                return 'dec_only'
+            return f'unsupported_scope:{scope}'
+        return mode
+
+    def _log_phasec_regime_config(self):
+        if not self._phasec_regime_active():
+            return
+        print('PhaseC regime config:')
+        print(f'  mode={self.args.phasec_regime_mode}')
+        print(f'  scope={getattr(self.args, "phasec_regime_scope", "global")}')
+        print(f'  regime_route_effective={self._phasec_regime_route_effective()}')
+        print(f'  regime_artifact_path={self.args.phasec_regime_lambda_path}')
+        print(f'  regime_hash={self.args.phasec_regime_lambda_hash or "(unspecified)"}')
 
     def _compute_phasec_sample_weights(self, batch_gating, num_samples, device):
         base = torch.ones(num_samples, device=device)
@@ -178,6 +204,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
         self._log_phasec_gating_config()
+        self._log_phasec_regime_config()
 
         if self.args.use_amp:
             scaler = torch.cuda.amp.GradScaler()

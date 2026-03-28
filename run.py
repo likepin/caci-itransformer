@@ -39,6 +39,7 @@ if __name__ == '__main__':
     parser.add_argument('--phasec_regime_lambda_path', type=str, default='', help='optional Phase C regime lambda artifact for regime-only experiments')
     parser.add_argument('--phasec_regime_lambda_hash', type=str, default='', help='optional frozen hash for the Phase C regime lambda artifact')
     parser.add_argument('--phasec_regime_mode', type=str, default='none', choices=['none', 'noop', 'extra_time_feature', 'light_aux_input'], help='Phase C regime integration mode')
+    parser.add_argument('--phasec_regime_scope', type=str, default='global', choices=['global', 'decoder_only'], help='Scope of Phase C light_aux_input regime integration; global preserves the unrestricted Phase C path')
     parser.add_argument('--seed', type=int, default=2023, help='global random seed')
     parser.add_argument('--features', type=str, default='M',
                         help='forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, S:univariate predict univariate, MS:multivariate predict univariate')
@@ -120,6 +121,8 @@ if __name__ == '__main__':
         raise ValueError('phasec_regime_lambda_path is required when phasec_regime_mode is active')
     if args.phasec_regime_mode == 'none':
         args.phasec_regime_lambda_hash = ''
+    if args.phasec_regime_mode != 'light_aux_input' and args.phasec_regime_scope != 'global':
+        raise ValueError('phasec_regime_scope only applies when phasec_regime_mode=light_aux_input')
 
     random.seed(args.seed)
     np.random.seed(args.seed)

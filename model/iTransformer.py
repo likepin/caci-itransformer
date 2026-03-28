@@ -23,6 +23,7 @@ class Model(nn.Module):
                                                     configs.dropout)
         self.class_strategy = configs.class_strategy
         self.phasec_regime_mode = getattr(configs, 'phasec_regime_mode', 'none')
+        self.phasec_regime_scope = getattr(configs, 'phasec_regime_scope', 'global')
         if self.phasec_regime_mode == 'light_aux_input':
             self.regime_aux_enc_embedding = nn.Linear(configs.seq_len, configs.d_model)
             self.regime_aux_dec_embedding = nn.Linear(configs.label_len + configs.pred_len, configs.d_model)
@@ -60,11 +61,19 @@ class Model(nn.Module):
         # B L N -> B N E                (B L N -> B L E in the vanilla Transformer)
         enc_out = self.enc_embedding(x_enc, x_mark_enc) # covariates (e.g timestamp) can be also embedded as tokens
         if self.phasec_regime_mode == 'light_aux_input':
-            if regime_aux_enc is None or regime_aux_dec is None:
-                raise ValueError('Phase C regime light_aux_input requires both encoder and decoder auxiliary regime tensors')
-            aux_enc = self.regime_aux_enc_embedding(regime_aux_enc.permute(0, 2, 1).float())
+            if regime_aux_dec is None:
+                raise ValueError('Phase C regime light_aux_input requires the decoder auxiliary regime tensor')
+            aux_tokens = []
+            if self.phasec_regime_scope == 'global':
+                if regime_aux_enc is None:
+                    raise ValueError('Phase C regime light_aux_input with global scope requires the encoder auxiliary regime tensor')
+                aux_enc = self.regime_aux_enc_embedding(regime_aux_enc.permute(0, 2, 1).float())
+                aux_tokens.append(aux_enc)
+            elif self.phasec_regime_scope != 'decoder_only':
+                raise ValueError(f'Unsupported phasec_regime_scope: {self.phasec_regime_scope}')
             aux_dec = self.regime_aux_dec_embedding(regime_aux_dec.permute(0, 2, 1).float())
-            enc_out = torch.cat([enc_out, aux_enc, aux_dec], dim=1)
+            aux_tokens.append(aux_dec)
+            enc_out = torch.cat([enc_out] + aux_tokens, dim=1)
         
         # B N E -> B N E                (B L E -> B L E in the vanilla Transformer)
         # the dimensions of embedded time series has been inverted, and then processed by native attn, layernorm and ffn modules

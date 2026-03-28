@@ -34,7 +34,19 @@ class SliceWindowDataset(Dataset):
         return seq_x, seq_y, seq_x_mark, seq_y_mark, regime_x_aux, regime_y_aux, times
 
 
-def build_args(train_cfg_path, split_artifact_path, root_path, data_path, use_gpu, phasec_regime_lambda_path='', phasec_regime_lambda_hash='', phasec_regime_mode='none'):
+def regime_route_effective(phasec_regime_mode, phasec_regime_scope):
+    if phasec_regime_mode == 'none':
+        return 'off'
+    if phasec_regime_mode == 'light_aux_input':
+        if phasec_regime_scope == 'global':
+            return 'enc_and_dec'
+        if phasec_regime_scope == 'decoder_only':
+            return 'dec_only'
+        return f'unsupported_scope:{phasec_regime_scope}'
+    return phasec_regime_mode
+
+
+def build_args(train_cfg_path, split_artifact_path, root_path, data_path, use_gpu, phasec_regime_lambda_path='', phasec_regime_lambda_hash='', phasec_regime_mode='none', phasec_regime_scope='global'):
     cfg = json.loads(Path(train_cfg_path).read_text(encoding='utf-8'))
     frozen = cfg['frozen_round1_training_config']
     return SimpleNamespace(
@@ -97,6 +109,7 @@ def build_args(train_cfg_path, split_artifact_path, root_path, data_path, use_gp
         phasec_regime_lambda_path=phasec_regime_lambda_path,
         phasec_regime_lambda_hash=phasec_regime_lambda_hash,
         phasec_regime_mode=phasec_regime_mode,
+        phasec_regime_scope=phasec_regime_scope,
     )
 
 
@@ -147,6 +160,7 @@ def main():
     parser.add_argument('--phasec-regime-lambda-path', default='')
     parser.add_argument('--phasec-regime-lambda-hash', default='')
     parser.add_argument('--phasec-regime-mode', default='none', choices=['none', 'noop', 'extra_time_feature', 'light_aux_input'])
+    parser.add_argument('--phasec-regime-scope', default='global', choices=['global', 'decoder_only'])
     args = parser.parse_args()
 
     use_gpu = str(args.use_gpu).strip().lower() in {'true', '1', 'yes', 'y'}
@@ -156,7 +170,17 @@ def main():
     switch_pre = [split['switch_window']['pre_slice']]
     switch_post = [split['switch_window']['post_slice']]
 
-    model_args = build_args(args.train_config, args.split_artifact, args.root_path, args.data_path, use_gpu, args.phasec_regime_lambda_path, args.phasec_regime_lambda_hash, args.phasec_regime_mode)
+    model_args = build_args(
+        args.train_config,
+        args.split_artifact,
+        args.root_path,
+        args.data_path,
+        use_gpu,
+        args.phasec_regime_lambda_path,
+        args.phasec_regime_lambda_hash,
+        args.phasec_regime_mode,
+        args.phasec_regime_scope,
+    )
     exp = Exp_Long_Term_Forecast(model_args)
 
     checkpoint_file = Path(args.checkpoint_dir) / 'checkpoint.pth'
@@ -215,6 +239,9 @@ def main():
         'results_dir': str(Path(args.results_dir)),
         'evaluation_unit': 'prediction_elements_without_timestamp_dedup',
         'indexing': 'zero_based_half_open_[start,end)',
+        'phasec_regime_mode': args.phasec_regime_mode,
+        'phasec_regime_scope': args.phasec_regime_scope,
+        'regime_route_effective': regime_route_effective(args.phasec_regime_mode, args.phasec_regime_scope),
         'window_start_count': int(len(starts)),
         'window_start_min': int(starts.min()),
         'window_start_max': int(starts.max()),
