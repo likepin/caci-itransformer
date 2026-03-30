@@ -35,11 +35,12 @@ class EncoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.activation = F.relu if activation == "relu" else F.gelu
 
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, attn_mask=None, tau=None, delta=None, graph_bias=None):
         new_x, attn = self.attention(
             x, x, x,
             attn_mask=attn_mask,
             tau=tau, delta=delta
+            , graph_bias=graph_bias
         )
         x = x + self.dropout(new_x)
 
@@ -57,20 +58,23 @@ class Encoder(nn.Module):
         self.conv_layers = nn.ModuleList(conv_layers) if conv_layers is not None else None
         self.norm = norm_layer
 
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, attn_mask=None, tau=None, delta=None, graph_biases=None):
         # x [B, L, D]
         attns = []
         if self.conv_layers is not None:
             for i, (attn_layer, conv_layer) in enumerate(zip(self.attn_layers, self.conv_layers)):
                 delta = delta if i == 0 else None
-                x, attn = attn_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
+                graph_bias = None if graph_biases is None else graph_biases[i]
+                x, attn = attn_layer(x, attn_mask=attn_mask, tau=tau, delta=delta, graph_bias=graph_bias)
                 x = conv_layer(x)
                 attns.append(attn)
-            x, attn = self.attn_layers[-1](x, tau=tau, delta=None)
+            tail_graph_bias = None if graph_biases is None else graph_biases[-1]
+            x, attn = self.attn_layers[-1](x, tau=tau, delta=None, graph_bias=tail_graph_bias)
             attns.append(attn)
         else:
-            for attn_layer in self.attn_layers:
-                x, attn = attn_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            for i, attn_layer in enumerate(self.attn_layers):
+                graph_bias = None if graph_biases is None else graph_biases[i]
+                x, attn = attn_layer(x, attn_mask=attn_mask, tau=tau, delta=delta, graph_bias=graph_bias)
                 attns.append(attn)
 
         if self.norm is not None:

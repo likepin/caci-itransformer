@@ -16,7 +16,7 @@ class FlowAttention(nn.Module):
     def kernel_method(self, x):
         return torch.sigmoid(x)
 
-    def forward(self, queries, keys, values, attn_mask, tau=None, delta=None):
+    def forward(self, queries, keys, values, attn_mask, tau=None, delta=None, graph_bias=None):
         queries = queries.transpose(1, 2)
         keys = keys.transpose(1, 2)
         values = values.transpose(1, 2)
@@ -124,7 +124,7 @@ class FlashAttention(nn.Module):
         m = torch.cat(m_BLOCKS, dim=2)
         return O, l, m
 
-    def forward(self, queries, keys, values, attn_mask, tau=None, delta=None):
+    def forward(self, queries, keys, values, attn_mask, tau=None, delta=None, graph_bias=None):
         res = \
         self.flash_attention_forward(queries.permute(0, 2, 1, 3), keys.permute(0, 2, 1, 3), values.permute(0, 2, 1, 3),
                                      attn_mask)[0]
@@ -139,12 +139,14 @@ class FullAttention(nn.Module):
         self.output_attention = output_attention
         self.dropout = nn.Dropout(attention_dropout)
 
-    def forward(self, queries, keys, values, attn_mask, tau=None, delta=None):
+    def forward(self, queries, keys, values, attn_mask, tau=None, delta=None, graph_bias=None):
         B, L, H, E = queries.shape
         _, S, _, D = values.shape
         scale = self.scale or 1. / sqrt(E)
 
-        scores = torch.einsum("blhe,bshe->bhls", queries, keys)
+        scores = scale * torch.einsum("blhe,bshe->bhls", queries, keys)
+        if graph_bias is not None:
+            scores = scores + graph_bias.unsqueeze(1)
 
         if self.mask_flag:
             if attn_mask is None:
@@ -152,7 +154,7 @@ class FullAttention(nn.Module):
 
             scores.masked_fill_(attn_mask.mask, -np.inf)
 
-        A = self.dropout(torch.softmax(scale * scores, dim=-1))
+        A = self.dropout(torch.softmax(scores, dim=-1))
         V = torch.einsum("bhls,bshd->blhd", A, values)
 
         if self.output_attention:
@@ -231,7 +233,7 @@ class ProbAttention(nn.Module):
         else:
             return (context_in, None)
 
-    def forward(self, queries, keys, values, attn_mask, tau=None, delta=None):
+    def forward(self, queries, keys, values, attn_mask, tau=None, delta=None, graph_bias=None):
         B, L_Q, H, D = queries.shape
         _, L_K, _, _ = keys.shape
 
@@ -278,7 +280,7 @@ class AttentionLayer(nn.Module):
         self.out_projection = nn.Linear(d_values * n_heads, d_model)
         self.n_heads = n_heads
 
-    def forward(self, queries, keys, values, attn_mask, tau=None, delta=None):
+    def forward(self, queries, keys, values, attn_mask, tau=None, delta=None, graph_bias=None):
         B, L, _ = queries.shape
         _, S, _ = keys.shape
         H = self.n_heads
@@ -293,7 +295,8 @@ class AttentionLayer(nn.Module):
             values,
             attn_mask,
             tau=tau,
-            delta=delta
+            delta=delta,
+            graph_bias=graph_bias,
         )
         out = out.view(B, L, -1)
 
@@ -323,9 +326,8 @@ class ReformerLayer(nn.Module):
             fill_len = (self.bucket_size * 2) - (N % (self.bucket_size * 2))
             return torch.cat([queries, torch.zeros([B, fill_len, C]).to(queries.device)], dim=1)
 
-    def forward(self, queries, keys, values, attn_mask, tau, delta):
+    def forward(self, queries, keys, values, attn_mask, tau, delta, graph_bias=None):
         # in Reformer: defalut queries=keys
         B, N, C = queries.shape
         queries = self.attn(self.fit_length(queries))[:, :N, :]
         return queries, None
-

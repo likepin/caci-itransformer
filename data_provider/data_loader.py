@@ -6,15 +6,53 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 from utils.timefeatures import time_features
+from utils.phase_d_interface import load_phase_d_train_bundle
 import warnings
 
 warnings.filterwarnings('ignore')
 
 
+def _init_phase_d_fields(dataset, flag, phase_d_enable=False, phase_d_interface_dir='', phase_d_shuffle_lambda=False, phase_d_seed=2023):
+    dataset.flag = flag
+    dataset.phase_d_enable = bool(phase_d_enable)
+    dataset.phase_d_interface_dir = phase_d_interface_dir
+    dataset.phase_d_shuffle_lambda = bool(phase_d_shuffle_lambda)
+    dataset.phase_d_seed = int(phase_d_seed)
+    dataset.phase_d_lambda_train = None
+    dataset.phase_d_delta_train = None
+    dataset.phase_d_manifest_path = ''
+
+
+def _attach_phase_d_train_bundle(dataset):
+    if not getattr(dataset, 'phase_d_enable', False) or getattr(dataset, 'flag', '') != 'train':
+        return
+    if hasattr(dataset, 'window_starts'):
+        window_starts = np.asarray(dataset.window_starts, dtype=np.int64)
+    else:
+        max_start = len(dataset.data_x) - dataset.seq_len - dataset.pred_len + 1
+        window_starts = np.arange(max_start, dtype=np.int64)
+    bundle = load_phase_d_train_bundle(
+        root_path=dataset.root_path,
+        interface_dir=dataset.phase_d_interface_dir,
+        window_starts=window_starts,
+        expected_nodes=dataset.data_x.shape[1],
+        shuffle_lambda=dataset.phase_d_shuffle_lambda,
+        shuffle_seed=dataset.phase_d_seed,
+    )
+    dataset.phase_d_lambda_train = bundle['lambda_train']
+    dataset.phase_d_delta_train = bundle['delta_train']
+    dataset.phase_d_manifest_path = bundle['manifest_path']
+    print(f'PhaseD train interface bundle ({dataset.flag}): {bundle["interface_dir"]}')
+    print(f'PhaseD train windows ({dataset.flag}): {len(dataset.phase_d_lambda_train)}')
+    if dataset.phase_d_shuffle_lambda:
+        print(f'PhaseD lambda shuffle ({dataset.flag}): enabled with seed={dataset.phase_d_seed}')
+
+
 class Dataset_ETT_hour(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
-                 target='OT', scale=True, timeenc=0, freq='h'):
+                 target='OT', scale=True, timeenc=0, freq='h',
+                 phase_d_enable=False, phase_d_interface_dir='', phase_d_shuffle_lambda=False, phase_d_seed=2023):
         # size [seq_len, label_len, pred_len]
         # info
         if size == None:
@@ -29,6 +67,8 @@ class Dataset_ETT_hour(Dataset):
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
+        _init_phase_d_fields(self, flag, phase_d_enable=phase_d_enable, phase_d_interface_dir=phase_d_interface_dir,
+                             phase_d_shuffle_lambda=phase_d_shuffle_lambda, phase_d_seed=phase_d_seed)
 
         self.features = features
         self.target = target
@@ -78,6 +118,7 @@ class Dataset_ETT_hour(Dataset):
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]
         self.data_stamp = data_stamp
+        _attach_phase_d_train_bundle(self)
 
     def __getitem__(self, index):
         s_begin = index
@@ -90,6 +131,8 @@ class Dataset_ETT_hour(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
+        if self.phase_d_lambda_train is not None:
+            return seq_x, seq_y, seq_x_mark, seq_y_mark, np.float32(self.phase_d_lambda_train[index]), self.phase_d_delta_train[index]
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
@@ -102,7 +145,8 @@ class Dataset_ETT_hour(Dataset):
 class Dataset_ETT_minute(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTm1.csv',
-                 target='OT', scale=True, timeenc=0, freq='t'):
+                 target='OT', scale=True, timeenc=0, freq='t',
+                 phase_d_enable=False, phase_d_interface_dir='', phase_d_shuffle_lambda=False, phase_d_seed=2023):
         # size [seq_len, label_len, pred_len]
         # info
         if size == None:
@@ -117,6 +161,8 @@ class Dataset_ETT_minute(Dataset):
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
+        _init_phase_d_fields(self, flag, phase_d_enable=phase_d_enable, phase_d_interface_dir=phase_d_interface_dir,
+                             phase_d_shuffle_lambda=phase_d_shuffle_lambda, phase_d_seed=phase_d_seed)
 
         self.features = features
         self.target = target
@@ -168,6 +214,7 @@ class Dataset_ETT_minute(Dataset):
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]
         self.data_stamp = data_stamp
+        _attach_phase_d_train_bundle(self)
 
     def __getitem__(self, index):
         s_begin = index
@@ -180,6 +227,8 @@ class Dataset_ETT_minute(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
+        if self.phase_d_lambda_train is not None:
+            return seq_x, seq_y, seq_x_mark, seq_y_mark, np.float32(self.phase_d_lambda_train[index]), self.phase_d_delta_train[index]
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
@@ -192,7 +241,8 @@ class Dataset_ETT_minute(Dataset):
 class Dataset_Custom(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
-                 target='OT', scale=True, timeenc=0, freq='h'):
+                 target='OT', scale=True, timeenc=0, freq='h',
+                 phase_d_enable=False, phase_d_interface_dir='', phase_d_shuffle_lambda=False, phase_d_seed=2023):
         # size [seq_len, label_len, pred_len]
         # info
         if size == None:
@@ -207,6 +257,8 @@ class Dataset_Custom(Dataset):
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
+        _init_phase_d_fields(self, flag, phase_d_enable=phase_d_enable, phase_d_interface_dir=phase_d_interface_dir,
+                             phase_d_shuffle_lambda=phase_d_shuffle_lambda, phase_d_seed=phase_d_seed)
 
         self.features = features
         self.target = target
@@ -266,6 +318,7 @@ class Dataset_Custom(Dataset):
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]
         self.data_stamp = data_stamp
+        _attach_phase_d_train_bundle(self)
 
     def __getitem__(self, index):
         s_begin = index
@@ -278,6 +331,8 @@ class Dataset_Custom(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
+        if self.phase_d_lambda_train is not None:
+            return seq_x, seq_y, seq_x_mark, seq_y_mark, np.float32(self.phase_d_lambda_train[index]), self.phase_d_delta_train[index]
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
@@ -293,7 +348,8 @@ class Dataset_PhaseC_Synthetic(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='X.npy', target='OT', scale=True, timeenc=0, freq='h',
                  phasec_split_path=None, phasec_gating_lambda_path=None, phasec_gating_mode='none',
-                 phasec_regime_lambda_path=None, phasec_regime_mode='none'):
+                 phasec_regime_lambda_path=None, phasec_regime_mode='none',
+                 phase_d_enable=False, phase_d_interface_dir='', phase_d_shuffle_lambda=False, phase_d_seed=2023):
         if size is None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
@@ -304,7 +360,8 @@ class Dataset_PhaseC_Synthetic(Dataset):
             self.pred_len = size[2]
 
         assert flag in ['train', 'test', 'val']
-        self.flag = flag
+        _init_phase_d_fields(self, flag, phase_d_enable=phase_d_enable, phase_d_interface_dir=phase_d_interface_dir,
+                             phase_d_shuffle_lambda=phase_d_shuffle_lambda, phase_d_seed=phase_d_seed)
         self.features = features
         self.target = target
         self.scale = scale
@@ -457,6 +514,7 @@ class Dataset_PhaseC_Synthetic(Dataset):
         self.window_starts = self._build_valid_starts(active_intervals)
         if len(self.window_starts) == 0:
             raise ValueError(f'No valid windows available for split {self.flag}')
+        _attach_phase_d_train_bundle(self)
 
         print(f'PhaseC split artifact ({self.flag}): {self.split_artifact_path}')
         print(f'PhaseC intervals ({self.flag}): {self.split_intervals}')
@@ -468,7 +526,7 @@ class Dataset_PhaseC_Synthetic(Dataset):
             print(f'PhaseC regime lambda artifact ({self.flag}): {self.phasec_regime_lambda_path}')
             print(f'PhaseC regime lambda length ({self.flag}): {len(self.phasec_regime_lambda)}')
 
-    def _slice_sample_by_start(self, s_begin):
+    def _slice_sample_by_start(self, s_begin, sample_index=None):
         s_begin = int(s_begin)
         s_end = s_begin + self.seq_len
         r_begin = s_end - self.label_len
@@ -504,10 +562,14 @@ class Dataset_PhaseC_Synthetic(Dataset):
                 seq_x_mark = np.concatenate([seq_x_mark.astype(np.float32), regime_x_aux], axis=1)
                 seq_y_mark = np.concatenate([seq_y_mark.astype(np.float32), regime_y_aux], axis=1)
 
+        if self.phase_d_lambda_train is not None:
+            if sample_index is None:
+                raise ValueError('Phase D train bundle requires a dataset sample index for alignment')
+            return seq_x, seq_y, seq_x_mark, seq_y_mark, gating_future, regime_x_aux, regime_y_aux, np.float32(self.phase_d_lambda_train[sample_index]), self.phase_d_delta_train[sample_index]
         return seq_x, seq_y, seq_x_mark, seq_y_mark, gating_future, regime_x_aux, regime_y_aux
 
     def __getitem__(self, index):
-        return self._slice_sample_by_start(self.window_starts[index])
+        return self._slice_sample_by_start(self.window_starts[index], sample_index=index)
 
     def __len__(self):
         return len(self.window_starts)

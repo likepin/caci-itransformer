@@ -39,6 +39,15 @@ if __name__ == '__main__':
     parser.add_argument('--phasec_regime_lambda_path', type=str, default='', help='optional Phase C regime lambda artifact for regime-only experiments')
     parser.add_argument('--phasec_regime_lambda_hash', type=str, default='', help='optional frozen hash for the Phase C regime lambda artifact')
     parser.add_argument('--phasec_regime_mode', type=str, default='none', choices=['none', 'noop', 'extra_time_feature', 'light_aux_input'], help='Phase C regime integration mode')
+    parser.add_argument('--phase_d_enable', type=str2bool, nargs='?', const=True, default=False, help='enable Phase D train-time graph-guided path')
+    parser.add_argument('--phase_d_interface_dir', type=str, default='', help='directory that stores the exported Phase D interface bundle')
+    parser.add_argument('--phase_d_use_static_bias', type=str2bool, nargs='?', const=True, default=True, help='apply static graph bias when Phase D is enabled')
+    parser.add_argument('--phase_d_use_dynamic_bias', type=str2bool, nargs='?', const=True, default=True, help='apply train-time dynamic graph bias when Phase D is enabled')
+    parser.add_argument('--phase_d_use_lambda_gate', type=str2bool, nargs='?', const=True, default=True, help='gate dynamic graph bias by (1 - lambda^(w)) when enabled')
+    parser.add_argument('--phase_d_shuffle_lambda', type=str2bool, nargs='?', const=True, default=False, help='shuffle train-window lambda for negative-control runs')
+    parser.add_argument('--phase_d_eval_use_static_bias', type=str2bool, nargs='?', const=True, default=True, help='keep static graph bias enabled at val/test when Phase D is active')
+    parser.add_argument('--phase_d_beta_static', type=float, default=0.10, help='strength of static graph soft bias')
+    parser.add_argument('--phase_d_beta_dynamic', type=float, default=0.05, help='strength of dynamic graph soft bias')
     parser.add_argument('--seed', type=int, default=2023, help='global random seed')
     parser.add_argument('--features', type=str, default='M',
                         help='forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, S:univariate predict univariate, MS:multivariate predict univariate')
@@ -120,6 +129,18 @@ if __name__ == '__main__':
         raise ValueError('phasec_regime_lambda_path is required when phasec_regime_mode is active')
     if args.phasec_regime_mode == 'none':
         args.phasec_regime_lambda_hash = ''
+    if args.phase_d_enable and not args.phase_d_interface_dir:
+        raise ValueError('phase_d_interface_dir is required when phase_d_enable is active')
+    if args.phase_d_use_lambda_gate and not args.phase_d_use_dynamic_bias:
+        raise ValueError('phase_d_use_lambda_gate requires phase_d_use_dynamic_bias to be enabled')
+    if args.phase_d_shuffle_lambda and not args.phase_d_use_lambda_gate:
+        raise ValueError('phase_d_shuffle_lambda only makes sense when phase_d_use_lambda_gate is enabled')
+    if args.phase_d_eval_use_static_bias and not args.phase_d_use_static_bias:
+        raise ValueError('phase_d_eval_use_static_bias requires phase_d_use_static_bias to be enabled')
+    if args.phase_d_beta_static < 0.0:
+        raise ValueError('phase_d_beta_static must be non-negative')
+    if args.phase_d_beta_dynamic < 0.0:
+        raise ValueError('phase_d_beta_dynamic must be non-negative')
 
     random.seed(args.seed)
     np.random.seed(args.seed)
