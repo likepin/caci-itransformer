@@ -5,7 +5,7 @@ from layers.Transformer_EncDec import Encoder, EncoderLayer
 from layers.SelfAttention_Family import FullAttention, AttentionLayer
 from layers.Embed import DataEmbedding_inverted
 import numpy as np
-from utils.phase_d_interface import load_phase_d_static_bundle
+from utils.graph_interface import load_graph_static_bundle
 
 
 class Model(nn.Module):
@@ -24,30 +24,30 @@ class Model(nn.Module):
                                                     configs.dropout)
         self.class_strategy = configs.class_strategy
         self.phasec_regime_mode = getattr(configs, 'phasec_regime_mode', 'none')
-        self.phase_d_enable = bool(getattr(configs, 'phase_d_enable', False))
-        self.phase_d_use_static_bias = bool(getattr(configs, 'phase_d_use_static_bias', False))
-        self.phase_d_use_dynamic_bias = bool(getattr(configs, 'phase_d_use_dynamic_bias', False))
-        self.phase_d_use_lambda_gate = bool(getattr(configs, 'phase_d_use_lambda_gate', False))
-        self.phase_d_eval_use_static_bias = bool(getattr(configs, 'phase_d_eval_use_static_bias', False))
-        self.phase_d_beta_static = float(getattr(configs, 'phase_d_beta_static', 0.0))
-        self.phase_d_beta_dynamic = float(getattr(configs, 'phase_d_beta_dynamic', 0.0))
-        self.phase_d_manifest_path = ''
-        self.phase_d_interface_dir = getattr(configs, 'phase_d_interface_dir', '')
+        self.graph_enable = bool(getattr(configs, 'graph_enable', False))
+        self.graph_use_static_bias = bool(getattr(configs, 'graph_use_static_bias', False))
+        self.graph_use_dynamic_bias = bool(getattr(configs, 'graph_use_dynamic_bias', False))
+        self.graph_use_lambda_gate = bool(getattr(configs, 'graph_use_lambda_gate', False))
+        self.graph_eval_use_static_bias = bool(getattr(configs, 'graph_eval_use_static_bias', False))
+        self.graph_beta_static = float(getattr(configs, 'graph_beta_static', 0.0))
+        self.graph_beta_dynamic = float(getattr(configs, 'graph_beta_dynamic', 0.0))
+        self.graph_manifest_path = ''
+        self.graph_interface_dir = getattr(configs, 'graph_interface_dir', '')
         if self.phasec_regime_mode == 'light_aux_input':
             self.regime_aux_enc_embedding = nn.Linear(configs.seq_len, configs.d_model)
             self.regime_aux_dec_embedding = nn.Linear(configs.label_len + configs.pred_len, configs.d_model)
-        if self.phase_d_enable and (self.phase_d_use_static_bias or self.phase_d_use_dynamic_bias):
-            static_bundle = load_phase_d_static_bundle(
+        if self.graph_enable and (self.graph_use_static_bias or self.graph_use_dynamic_bias):
+            static_bundle = load_graph_static_bundle(
                 root_path=getattr(configs, 'root_path', ''),
-                interface_dir=self.phase_d_interface_dir,
+                interface_dir=self.graph_interface_dir,
                 expected_nodes=configs.enc_in,
             )
-            self.register_buffer('phase_d_a_base', torch.from_numpy(static_bundle['a_base']).float())
-            self.register_buffer('phase_d_support', torch.from_numpy(static_bundle['support']).float())
-            self.phase_d_manifest_path = static_bundle['manifest_path']
+            self.register_buffer('graph_a_base', torch.from_numpy(static_bundle['a_base']).float())
+            self.register_buffer('graph_support', torch.from_numpy(static_bundle['support']).float())
+            self.graph_manifest_path = static_bundle['manifest_path']
         else:
-            self.phase_d_a_base = None
-            self.phase_d_support = None
+            self.graph_a_base = None
+            self.graph_support = None
         # Encoder-only architecture
         self.encoder = Encoder(
             [
@@ -65,21 +65,21 @@ class Model(nn.Module):
         )
         self.projector = nn.Linear(configs.d_model, configs.pred_len, bias=True)
 
-    def _build_phase_d_graph_bias(self, batch_size, token_count, num_variates, device, phase_d_lambda=None, phase_d_delta=None):
+    def _build_graph_bias(self, batch_size, token_count, num_variates, device, graph_lambda=None, graph_delta=None):
         graph_bias = None
-        if self.phase_d_enable and self.phase_d_use_static_bias:
-            use_static = self.training or self.phase_d_eval_use_static_bias
+        if self.graph_enable and self.graph_use_static_bias:
+            use_static = self.training or self.graph_eval_use_static_bias
             if use_static:
                 graph_bias = torch.zeros(batch_size, token_count, token_count, device=device, dtype=torch.float32)
-                graph_bias[:, :num_variates, :num_variates] += self.phase_d_beta_static * self.phase_d_a_base.to(device)
-        if self.phase_d_enable and self.training and self.phase_d_use_dynamic_bias:
-            if phase_d_delta is None:
-                raise ValueError('Phase D dynamic bias is enabled but phase_d_delta was not provided for a training batch')
-            dynamic_block = self.phase_d_beta_dynamic * phase_d_delta.float().to(device)
-            if self.phase_d_use_lambda_gate:
-                if phase_d_lambda is None:
-                    raise ValueError('Phase D lambda gate is enabled but phase_d_lambda was not provided for a training batch')
-                gate = (1.0 - phase_d_lambda.float().to(device)).view(batch_size, 1, 1)
+                graph_bias[:, :num_variates, :num_variates] += self.graph_beta_static * self.graph_a_base.to(device)
+        if self.graph_enable and self.training and self.graph_use_dynamic_bias:
+            if graph_delta is None:
+                raise ValueError('Graph dynamic bias is enabled but graph_delta was not provided for a training batch')
+            dynamic_block = self.graph_beta_dynamic * graph_delta.float().to(device)
+            if self.graph_use_lambda_gate:
+                if graph_lambda is None:
+                    raise ValueError('Graph lambda gate is enabled but graph_lambda was not provided for a training batch')
+                gate = (1.0 - graph_lambda.float().to(device)).view(batch_size, 1, 1)
                 dynamic_block = gate * dynamic_block
             if graph_bias is None:
                 graph_bias = torch.zeros(batch_size, token_count, token_count, device=device, dtype=torch.float32)
@@ -87,7 +87,7 @@ class Model(nn.Module):
         return graph_bias
 
     def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec, regime_aux_enc=None, regime_aux_dec=None,
-                 phase_d_lambda=None, phase_d_delta=None):
+                 graph_lambda=None, graph_delta=None):
         if self.use_norm:
             # Normalization from Non-stationary Transformer
             means = x_enc.mean(1, keepdim=True).detach()
@@ -109,13 +109,13 @@ class Model(nn.Module):
             aux_enc = self.regime_aux_enc_embedding(regime_aux_enc.permute(0, 2, 1).float())
             aux_dec = self.regime_aux_dec_embedding(regime_aux_dec.permute(0, 2, 1).float())
             enc_out = torch.cat([enc_out, aux_enc, aux_dec], dim=1)
-        graph_bias = self._build_phase_d_graph_bias(
+        graph_bias = self._build_graph_bias(
             batch_size=x_enc.shape[0],
             token_count=enc_out.shape[1],
             num_variates=N,
             device=enc_out.device,
-            phase_d_lambda=phase_d_lambda,
-            phase_d_delta=phase_d_delta,
+            graph_lambda=graph_lambda,
+            graph_delta=graph_delta,
         )
         graph_biases = [graph_bias] + [None] * (len(self.encoder.attn_layers) - 1) if graph_bias is not None else None
         
@@ -135,11 +135,11 @@ class Model(nn.Module):
 
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, regime_aux_enc=None, regime_aux_dec=None,
-                phase_d_lambda=None, phase_d_delta=None, mask=None):
+                graph_lambda=None, graph_delta=None, mask=None):
         dec_out, attns = self.forecast(
             x_enc, x_mark_enc, x_dec, x_mark_dec,
             regime_aux_enc=regime_aux_enc, regime_aux_dec=regime_aux_dec,
-            phase_d_lambda=phase_d_lambda, phase_d_delta=phase_d_delta,
+            graph_lambda=graph_lambda, graph_delta=graph_delta,
         )
         
         if self.output_attention:

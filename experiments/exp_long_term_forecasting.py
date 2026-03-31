@@ -44,8 +44,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             batch_x, batch_y, batch_x_mark, batch_y_mark, batch_gating, batch_regime_x_aux, batch_regime_y_aux = batch
             return batch_x, batch_y, batch_x_mark, batch_y_mark, batch_gating, batch_regime_x_aux, batch_regime_y_aux, None, None
         if len(batch) == 6:
-            batch_x, batch_y, batch_x_mark, batch_y_mark, batch_phase_d_lambda, batch_phase_d_delta = batch
-            return batch_x, batch_y, batch_x_mark, batch_y_mark, None, None, None, batch_phase_d_lambda, batch_phase_d_delta
+            batch_x, batch_y, batch_x_mark, batch_y_mark, batch_graph_lambda, batch_graph_delta = batch
+            return batch_x, batch_y, batch_x_mark, batch_y_mark, None, None, None, batch_graph_lambda, batch_graph_delta
         if len(batch) == 5:
             batch_x, batch_y, batch_x_mark, batch_y_mark, batch_gating = batch
             return batch_x, batch_y, batch_x_mark, batch_y_mark, batch_gating, None, None, None, None
@@ -60,8 +60,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
     def _phasec_should_log(self):
         return self._phasec_gating_active()
 
-    def _phase_d_active(self):
-        return bool(getattr(self.args, 'phase_d_enable', False))
+    def _graph_active(self):
+        return bool(getattr(self.args, 'graph_enable', False))
 
     def _log_phasec_gating_config(self):
         if not self._phasec_should_log():
@@ -77,18 +77,18 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         print(f'  gating_hash={self.args.phasec_gating_lambda_hash or "(unspecified)"}')
         print(f'  weight_normalization=batch_mean_1_then_alpha_shrink(alpha={self.args.phasec_gating_alpha})')
 
-    def _log_phase_d_config(self):
-        if not self._phase_d_active():
+    def _log_graph_config(self):
+        if not self._graph_active():
             return
-        print('PhaseD graph-guided config:')
-        print(f'  interface_dir={self.args.phase_d_interface_dir}')
-        print(f'  use_static_bias={self.args.phase_d_use_static_bias}')
-        print(f'  use_dynamic_bias={self.args.phase_d_use_dynamic_bias}')
-        print(f'  use_lambda_gate={self.args.phase_d_use_lambda_gate}')
-        print(f'  shuffle_lambda={self.args.phase_d_shuffle_lambda}')
-        print(f'  eval_use_static_bias={self.args.phase_d_eval_use_static_bias}')
-        print(f'  beta_static={self.args.phase_d_beta_static}')
-        print(f'  beta_dynamic={self.args.phase_d_beta_dynamic}')
+        print('Graph-guided config:')
+        print(f'  interface_dir={self.args.graph_interface_dir}')
+        print(f'  use_static_bias={self.args.graph_use_static_bias}')
+        print(f'  use_dynamic_bias={self.args.graph_use_dynamic_bias}')
+        print(f'  use_lambda_gate={self.args.graph_use_lambda_gate}')
+        print(f'  shuffle_lambda={self.args.graph_shuffle_lambda}')
+        print(f'  eval_use_static_bias={self.args.graph_eval_use_static_bias}')
+        print(f'  beta_static={self.args.graph_beta_static}')
+        print(f'  beta_dynamic={self.args.graph_beta_dynamic}')
 
     def _compute_phasec_sample_weights(self, batch_gating, num_samples, device):
         base = torch.ones(num_samples, device=device)
@@ -135,7 +135,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         print(f'Epoch {epoch} gating weight summary | {summary_str}')
 
     def _forward_batch(self, batch_x, batch_y, batch_x_mark, batch_y_mark, batch_regime_x_aux=None, batch_regime_y_aux=None,
-                       batch_phase_d_lambda=None, batch_phase_d_delta=None):
+                       batch_graph_lambda=None, batch_graph_delta=None):
         if 'PEMS' in self.args.data or 'Solar' in self.args.data:
             batch_x_mark = None
             batch_y_mark = None
@@ -147,10 +147,10 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             batch_regime_x_aux = batch_regime_x_aux.float().to(self.device)
         if batch_regime_y_aux is not None:
             batch_regime_y_aux = batch_regime_y_aux.float().to(self.device)
-        if batch_phase_d_lambda is not None:
-            batch_phase_d_lambda = batch_phase_d_lambda.float().to(self.device).view(-1)
-        if batch_phase_d_delta is not None:
-            batch_phase_d_delta = batch_phase_d_delta.float().to(self.device)
+        if batch_graph_lambda is not None:
+            batch_graph_lambda = batch_graph_lambda.float().to(self.device).view(-1)
+        if batch_graph_delta is not None:
+            batch_graph_delta = batch_graph_delta.float().to(self.device)
 
         dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
         dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
@@ -159,13 +159,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             outputs = self.model(
                 batch_x, batch_x_mark, dec_inp, batch_y_mark,
                 regime_aux_enc=batch_regime_x_aux, regime_aux_dec=batch_regime_y_aux,
-                phase_d_lambda=batch_phase_d_lambda, phase_d_delta=batch_phase_d_delta,
+                graph_lambda=batch_graph_lambda, graph_delta=batch_graph_delta,
             )[0]
         else:
             outputs = self.model(
                 batch_x, batch_x_mark, dec_inp, batch_y_mark,
                 regime_aux_enc=batch_regime_x_aux, regime_aux_dec=batch_regime_y_aux,
-                phase_d_lambda=batch_phase_d_lambda, phase_d_delta=batch_phase_d_delta,
+                graph_lambda=batch_graph_lambda, graph_delta=batch_graph_delta,
             )
 
         f_dim = -1 if self.args.features == 'MS' else 0
@@ -213,7 +213,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
         self._log_phasec_gating_config()
-        self._log_phase_d_config()
+        self._log_graph_config()
 
         if self.args.use_amp:
             scaler = torch.cuda.amp.GradScaler()
@@ -226,7 +226,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             self.model.train()
             epoch_time = time.time()
             for i, batch in enumerate(train_loader):
-                batch_x, batch_y, batch_x_mark, batch_y_mark, batch_gating, batch_regime_x_aux, batch_regime_y_aux, batch_phase_d_lambda, batch_phase_d_delta = self._unpack_batch(batch)
+                batch_x, batch_y, batch_x_mark, batch_y_mark, batch_gating, batch_regime_x_aux, batch_regime_y_aux, batch_graph_lambda, batch_graph_delta = self._unpack_batch(batch)
                 iter_count += 1
                 model_optim.zero_grad()
                 batch_x = batch_x.float().to(self.device)
@@ -237,7 +237,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         outputs, batch_y = self._forward_batch(
                             batch_x, batch_y, batch_x_mark, batch_y_mark,
                             batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux,
-                            batch_phase_d_lambda=batch_phase_d_lambda, batch_phase_d_delta=batch_phase_d_delta,
+                            batch_graph_lambda=batch_graph_lambda, batch_graph_delta=batch_graph_delta,
                         )
                         loss_raw = criterion(outputs, batch_y)
                         loss_per_sample = loss_raw.mean(dim=(1, 2))
@@ -247,7 +247,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     outputs, batch_y = self._forward_batch(
                         batch_x, batch_y, batch_x_mark, batch_y_mark,
                         batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux,
-                        batch_phase_d_lambda=batch_phase_d_lambda, batch_phase_d_delta=batch_phase_d_delta,
+                        batch_graph_lambda=batch_graph_lambda, batch_graph_delta=batch_graph_delta,
                     )
                     loss_raw = criterion(outputs, batch_y)
                     loss_per_sample = loss_raw.mean(dim=(1, 2))

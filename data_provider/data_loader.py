@@ -6,53 +6,53 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 from utils.timefeatures import time_features
-from utils.phase_d_interface import load_phase_d_train_bundle
+from utils.graph_interface import load_graph_train_bundle
 import warnings
 
 warnings.filterwarnings('ignore')
 
 
-def _init_phase_d_fields(dataset, flag, phase_d_enable=False, phase_d_interface_dir='', phase_d_shuffle_lambda=False, phase_d_seed=2023):
+def _init_graph_fields(dataset, flag, graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False, graph_seed=2023):
     dataset.flag = flag
-    dataset.phase_d_enable = bool(phase_d_enable)
-    dataset.phase_d_interface_dir = phase_d_interface_dir
-    dataset.phase_d_shuffle_lambda = bool(phase_d_shuffle_lambda)
-    dataset.phase_d_seed = int(phase_d_seed)
-    dataset.phase_d_lambda_train = None
-    dataset.phase_d_delta_train = None
-    dataset.phase_d_manifest_path = ''
+    dataset.graph_enable = bool(graph_enable)
+    dataset.graph_interface_dir = graph_interface_dir
+    dataset.graph_shuffle_lambda = bool(graph_shuffle_lambda)
+    dataset.graph_seed = int(graph_seed)
+    dataset.graph_lambda_train = None
+    dataset.graph_delta_train = None
+    dataset.graph_manifest_path = ''
 
 
-def _attach_phase_d_train_bundle(dataset):
-    if not getattr(dataset, 'phase_d_enable', False) or getattr(dataset, 'flag', '') != 'train':
+def _attach_graph_train_bundle(dataset):
+    if not getattr(dataset, 'graph_enable', False) or getattr(dataset, 'flag', '') != 'train':
         return
     if hasattr(dataset, 'window_starts'):
         window_starts = np.asarray(dataset.window_starts, dtype=np.int64)
     else:
         max_start = len(dataset.data_x) - dataset.seq_len - dataset.pred_len + 1
         window_starts = np.arange(max_start, dtype=np.int64)
-    bundle = load_phase_d_train_bundle(
+    bundle = load_graph_train_bundle(
         root_path=dataset.root_path,
-        interface_dir=dataset.phase_d_interface_dir,
+        interface_dir=dataset.graph_interface_dir,
         window_starts=window_starts,
         expected_nodes=dataset.data_x.shape[1],
-        shuffle_lambda=dataset.phase_d_shuffle_lambda,
-        shuffle_seed=dataset.phase_d_seed,
+        shuffle_lambda=dataset.graph_shuffle_lambda,
+        shuffle_seed=dataset.graph_seed,
     )
-    dataset.phase_d_lambda_train = bundle['lambda_train']
-    dataset.phase_d_delta_train = bundle['delta_train']
-    dataset.phase_d_manifest_path = bundle['manifest_path']
-    print(f'PhaseD train interface bundle ({dataset.flag}): {bundle["interface_dir"]}')
-    print(f'PhaseD train windows ({dataset.flag}): {len(dataset.phase_d_lambda_train)}')
-    if dataset.phase_d_shuffle_lambda:
-        print(f'PhaseD lambda shuffle ({dataset.flag}): enabled with seed={dataset.phase_d_seed}')
+    dataset.graph_lambda_train = bundle['lambda_train']
+    dataset.graph_delta_train = bundle['delta_train']
+    dataset.graph_manifest_path = bundle['manifest_path']
+    print(f'Graph train interface bundle ({dataset.flag}): {bundle["interface_dir"]}')
+    print(f'Graph train windows ({dataset.flag}): {len(dataset.graph_lambda_train)}')
+    if dataset.graph_shuffle_lambda:
+        print(f'Graph lambda shuffle ({dataset.flag}): enabled with seed={dataset.graph_seed}')
 
 
 class Dataset_ETT_hour(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
                  target='OT', scale=True, timeenc=0, freq='h',
-                 phase_d_enable=False, phase_d_interface_dir='', phase_d_shuffle_lambda=False, phase_d_seed=2023):
+                 graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False, graph_seed=2023):
         # size [seq_len, label_len, pred_len]
         # info
         if size == None:
@@ -67,8 +67,8 @@ class Dataset_ETT_hour(Dataset):
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
-        _init_phase_d_fields(self, flag, phase_d_enable=phase_d_enable, phase_d_interface_dir=phase_d_interface_dir,
-                             phase_d_shuffle_lambda=phase_d_shuffle_lambda, phase_d_seed=phase_d_seed)
+        _init_graph_fields(self, flag, graph_enable=graph_enable, graph_interface_dir=graph_interface_dir,
+                           graph_shuffle_lambda=graph_shuffle_lambda, graph_seed=graph_seed)
 
         self.features = features
         self.target = target
@@ -118,7 +118,7 @@ class Dataset_ETT_hour(Dataset):
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]
         self.data_stamp = data_stamp
-        _attach_phase_d_train_bundle(self)
+        _attach_graph_train_bundle(self)
 
     def __getitem__(self, index):
         s_begin = index
@@ -131,8 +131,8 @@ class Dataset_ETT_hour(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
-        if self.phase_d_lambda_train is not None:
-            return seq_x, seq_y, seq_x_mark, seq_y_mark, np.float32(self.phase_d_lambda_train[index]), self.phase_d_delta_train[index]
+        if self.graph_lambda_train is not None:
+            return seq_x, seq_y, seq_x_mark, seq_y_mark, np.float32(self.graph_lambda_train[index]), self.graph_delta_train[index]
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
@@ -146,7 +146,7 @@ class Dataset_ETT_minute(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTm1.csv',
                  target='OT', scale=True, timeenc=0, freq='t',
-                 phase_d_enable=False, phase_d_interface_dir='', phase_d_shuffle_lambda=False, phase_d_seed=2023):
+                 graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False, graph_seed=2023):
         # size [seq_len, label_len, pred_len]
         # info
         if size == None:
@@ -161,8 +161,8 @@ class Dataset_ETT_minute(Dataset):
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
-        _init_phase_d_fields(self, flag, phase_d_enable=phase_d_enable, phase_d_interface_dir=phase_d_interface_dir,
-                             phase_d_shuffle_lambda=phase_d_shuffle_lambda, phase_d_seed=phase_d_seed)
+        _init_graph_fields(self, flag, graph_enable=graph_enable, graph_interface_dir=graph_interface_dir,
+                           graph_shuffle_lambda=graph_shuffle_lambda, graph_seed=graph_seed)
 
         self.features = features
         self.target = target
@@ -214,7 +214,7 @@ class Dataset_ETT_minute(Dataset):
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]
         self.data_stamp = data_stamp
-        _attach_phase_d_train_bundle(self)
+        _attach_graph_train_bundle(self)
 
     def __getitem__(self, index):
         s_begin = index
@@ -227,8 +227,8 @@ class Dataset_ETT_minute(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
-        if self.phase_d_lambda_train is not None:
-            return seq_x, seq_y, seq_x_mark, seq_y_mark, np.float32(self.phase_d_lambda_train[index]), self.phase_d_delta_train[index]
+        if self.graph_lambda_train is not None:
+            return seq_x, seq_y, seq_x_mark, seq_y_mark, np.float32(self.graph_lambda_train[index]), self.graph_delta_train[index]
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
@@ -242,7 +242,7 @@ class Dataset_Custom(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
                  target='OT', scale=True, timeenc=0, freq='h',
-                 phase_d_enable=False, phase_d_interface_dir='', phase_d_shuffle_lambda=False, phase_d_seed=2023):
+                 graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False, graph_seed=2023):
         # size [seq_len, label_len, pred_len]
         # info
         if size == None:
@@ -257,8 +257,8 @@ class Dataset_Custom(Dataset):
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
-        _init_phase_d_fields(self, flag, phase_d_enable=phase_d_enable, phase_d_interface_dir=phase_d_interface_dir,
-                             phase_d_shuffle_lambda=phase_d_shuffle_lambda, phase_d_seed=phase_d_seed)
+        _init_graph_fields(self, flag, graph_enable=graph_enable, graph_interface_dir=graph_interface_dir,
+                           graph_shuffle_lambda=graph_shuffle_lambda, graph_seed=graph_seed)
 
         self.features = features
         self.target = target
@@ -318,7 +318,7 @@ class Dataset_Custom(Dataset):
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]
         self.data_stamp = data_stamp
-        _attach_phase_d_train_bundle(self)
+        _attach_graph_train_bundle(self)
 
     def __getitem__(self, index):
         s_begin = index
@@ -331,8 +331,8 @@ class Dataset_Custom(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
-        if self.phase_d_lambda_train is not None:
-            return seq_x, seq_y, seq_x_mark, seq_y_mark, np.float32(self.phase_d_lambda_train[index]), self.phase_d_delta_train[index]
+        if self.graph_lambda_train is not None:
+            return seq_x, seq_y, seq_x_mark, seq_y_mark, np.float32(self.graph_lambda_train[index]), self.graph_delta_train[index]
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
@@ -349,7 +349,7 @@ class Dataset_PhaseC_Synthetic(Dataset):
                  features='S', data_path='X.npy', target='OT', scale=True, timeenc=0, freq='h',
                  phasec_split_path=None, phasec_gating_lambda_path=None, phasec_gating_mode='none',
                  phasec_regime_lambda_path=None, phasec_regime_mode='none',
-                 phase_d_enable=False, phase_d_interface_dir='', phase_d_shuffle_lambda=False, phase_d_seed=2023):
+                 graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False, graph_seed=2023):
         if size is None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
@@ -360,8 +360,8 @@ class Dataset_PhaseC_Synthetic(Dataset):
             self.pred_len = size[2]
 
         assert flag in ['train', 'test', 'val']
-        _init_phase_d_fields(self, flag, phase_d_enable=phase_d_enable, phase_d_interface_dir=phase_d_interface_dir,
-                             phase_d_shuffle_lambda=phase_d_shuffle_lambda, phase_d_seed=phase_d_seed)
+        _init_graph_fields(self, flag, graph_enable=graph_enable, graph_interface_dir=graph_interface_dir,
+                           graph_shuffle_lambda=graph_shuffle_lambda, graph_seed=graph_seed)
         self.features = features
         self.target = target
         self.scale = scale
@@ -514,7 +514,7 @@ class Dataset_PhaseC_Synthetic(Dataset):
         self.window_starts = self._build_valid_starts(active_intervals)
         if len(self.window_starts) == 0:
             raise ValueError(f'No valid windows available for split {self.flag}')
-        _attach_phase_d_train_bundle(self)
+        _attach_graph_train_bundle(self)
 
         print(f'PhaseC split artifact ({self.flag}): {self.split_artifact_path}')
         print(f'PhaseC intervals ({self.flag}): {self.split_intervals}')
@@ -562,10 +562,10 @@ class Dataset_PhaseC_Synthetic(Dataset):
                 seq_x_mark = np.concatenate([seq_x_mark.astype(np.float32), regime_x_aux], axis=1)
                 seq_y_mark = np.concatenate([seq_y_mark.astype(np.float32), regime_y_aux], axis=1)
 
-        if self.phase_d_lambda_train is not None:
+        if self.graph_lambda_train is not None:
             if sample_index is None:
-                raise ValueError('Phase D train bundle requires a dataset sample index for alignment')
-            return seq_x, seq_y, seq_x_mark, seq_y_mark, gating_future, regime_x_aux, regime_y_aux, np.float32(self.phase_d_lambda_train[sample_index]), self.phase_d_delta_train[sample_index]
+                raise ValueError('Graph train bundle requires a dataset sample index for alignment')
+            return seq_x, seq_y, seq_x_mark, seq_y_mark, gating_future, regime_x_aux, regime_y_aux, np.float32(self.graph_lambda_train[sample_index]), self.graph_delta_train[sample_index]
         return seq_x, seq_y, seq_x_mark, seq_y_mark, gating_future, regime_x_aux, regime_y_aux
 
     def __getitem__(self, index):

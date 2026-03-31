@@ -46,10 +46,10 @@ def data_provider(args, flag):
         freq=freq,
     )
     if args.data in {'ETTh1', 'ETTh2', 'ETTm1', 'ETTm2', 'custom', 'phasec_synth'}:
-        data_kwargs['phase_d_enable'] = getattr(args, 'phase_d_enable', False)
-        data_kwargs['phase_d_interface_dir'] = getattr(args, 'phase_d_interface_dir', '')
-        data_kwargs['phase_d_shuffle_lambda'] = getattr(args, 'phase_d_shuffle_lambda', False)
-        data_kwargs['phase_d_seed'] = getattr(args, 'seed', 2023)
+        data_kwargs['graph_enable'] = getattr(args, 'graph_enable', False)
+        data_kwargs['graph_interface_dir'] = getattr(args, 'graph_interface_dir', '')
+        data_kwargs['graph_shuffle_lambda'] = getattr(args, 'graph_shuffle_lambda', False)
+        data_kwargs['graph_seed'] = getattr(args, 'seed', 2023)
     if args.data == 'phasec_synth':
         data_kwargs['phasec_split_path'] = args.phasec_split_path
         data_kwargs['phasec_gating_lambda_path'] = getattr(args, 'phasec_gating_lambda_path', '')
