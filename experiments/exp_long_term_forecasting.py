@@ -81,6 +81,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         if not self._graph_active():
             return
         print('Graph-guided config:')
+        print(f'  mode={self.args.graph_mode}')
         print(f'  interface_dir={self.args.graph_interface_dir}')
         print(f'  use_static_bias={self.args.graph_use_static_bias}')
         print(f'  use_dynamic_bias={self.args.graph_use_dynamic_bias}')
@@ -89,6 +90,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         print(f'  eval_use_static_bias={self.args.graph_eval_use_static_bias}')
         print(f'  beta_static={self.args.graph_beta_static}')
         print(f'  beta_dynamic={self.args.graph_beta_dynamic}')
+        print(f'  residual_alpha={self.args.graph_residual_alpha}')
 
     def _compute_phasec_sample_weights(self, batch_gating, num_samples, device):
         base = torch.ones(num_samples, device=device)

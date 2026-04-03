@@ -25,12 +25,14 @@ class Model(nn.Module):
         self.class_strategy = configs.class_strategy
         self.phasec_regime_mode = getattr(configs, 'phasec_regime_mode', 'none')
         self.graph_enable = bool(getattr(configs, 'graph_enable', False))
+        self.graph_mode = getattr(configs, 'graph_mode', 'soft_bias')
         self.graph_use_static_bias = bool(getattr(configs, 'graph_use_static_bias', False))
         self.graph_use_dynamic_bias = bool(getattr(configs, 'graph_use_dynamic_bias', False))
         self.graph_use_lambda_gate = bool(getattr(configs, 'graph_use_lambda_gate', False))
         self.graph_eval_use_static_bias = bool(getattr(configs, 'graph_eval_use_static_bias', False))
         self.graph_beta_static = float(getattr(configs, 'graph_beta_static', 0.0))
         self.graph_beta_dynamic = float(getattr(configs, 'graph_beta_dynamic', 0.0))
+        self.graph_residual_alpha = float(getattr(configs, 'graph_residual_alpha', 0.0))
         self.graph_manifest_path = ''
         self.graph_interface_dir = getattr(configs, 'graph_interface_dir', '')
         if self.phasec_regime_mode == 'light_aux_input':
@@ -48,6 +50,18 @@ class Model(nn.Module):
         else:
             self.graph_a_base = None
             self.graph_support = None
+        if self.graph_enable and self.graph_mode == 'residual_head' and (self.graph_use_static_bias or self.graph_use_dynamic_bias):
+            residual_input_dim = configs.d_model * 3
+            self.graph_residual_norm = nn.LayerNorm(residual_input_dim)
+            self.graph_residual_head = nn.Sequential(
+                nn.Linear(residual_input_dim, configs.d_model),
+                nn.GELU(),
+                nn.Dropout(configs.dropout),
+                nn.Linear(configs.d_model, configs.pred_len),
+            )
+        else:
+            self.graph_residual_norm = None
+            self.graph_residual_head = None
         # Encoder-only architecture
         self.encoder = Encoder(
             [
@@ -66,6 +80,8 @@ class Model(nn.Module):
         self.projector = nn.Linear(configs.d_model, configs.pred_len, bias=True)
 
     def _build_graph_bias(self, batch_size, token_count, num_variates, device, graph_lambda=None, graph_delta=None):
+        if self.graph_mode != 'soft_bias':
+            return None
         graph_bias = None
         if self.graph_enable and self.graph_use_static_bias:
             use_static = self.training or self.graph_eval_use_static_bias
@@ -83,8 +99,40 @@ class Model(nn.Module):
                 dynamic_block = gate * dynamic_block
             if graph_bias is None:
                 graph_bias = torch.zeros(batch_size, token_count, token_count, device=device, dtype=torch.float32)
-            graph_bias[:, :num_variates, :num_variates] += dynamic_block
+                graph_bias[:, :num_variates, :num_variates] += dynamic_block
         return graph_bias
+
+    def _build_graph_residual(self, variate_tokens, device, graph_lambda=None, graph_delta=None):
+        if not self.graph_enable or self.graph_mode != 'residual_head' or self.graph_residual_head is None:
+            return None
+
+        static_active = self.graph_use_static_bias and (self.training or self.graph_eval_use_static_bias)
+        dynamic_active = self.graph_use_dynamic_bias and self.training
+        if not static_active and not dynamic_active:
+            return None
+
+        batch_size, _, _ = variate_tokens.shape
+        static_tokens = torch.zeros_like(variate_tokens)
+        dynamic_tokens = torch.zeros_like(variate_tokens)
+
+        if static_active:
+            static_matrix = self.graph_beta_static * self.graph_a_base.to(device)
+            static_tokens = torch.einsum('ij,bje->bie', static_matrix, variate_tokens)
+
+        if dynamic_active:
+            if graph_delta is None:
+                raise ValueError('Graph dynamic branch is enabled but graph_delta was not provided for a training batch')
+            dynamic_matrix = self.graph_beta_dynamic * graph_delta.float().to(device)
+            if self.graph_use_lambda_gate:
+                if graph_lambda is None:
+                    raise ValueError('Graph lambda gate is enabled but graph_lambda was not provided for a training batch')
+                gate = (1.0 - graph_lambda.float().to(device)).view(batch_size, 1, 1)
+                dynamic_matrix = gate * dynamic_matrix
+            dynamic_tokens = torch.einsum('bij,bje->bie', dynamic_matrix, variate_tokens)
+
+        residual_input = torch.cat([variate_tokens, static_tokens, dynamic_tokens], dim=-1)
+        residual_tokens = self.graph_residual_head(self.graph_residual_norm(residual_input))
+        return self.graph_residual_alpha * residual_tokens.permute(0, 2, 1)
 
     def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec, regime_aux_enc=None, regime_aux_dec=None,
                  graph_lambda=None, graph_delta=None):
@@ -125,6 +173,14 @@ class Model(nn.Module):
 
         # B N E -> B N S -> B S N 
         dec_out = self.projector(enc_out).permute(0, 2, 1)[:, :, :N] # filter the covariates
+        graph_residual = self._build_graph_residual(
+            variate_tokens=enc_out[:, :N, :],
+            device=enc_out.device,
+            graph_lambda=graph_lambda,
+            graph_delta=graph_delta,
+        )
+        if graph_residual is not None:
+            dec_out = dec_out + graph_residual
 
         if self.use_norm:
             # De-Normalization from Non-stationary Transformer
