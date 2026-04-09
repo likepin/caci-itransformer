@@ -63,6 +63,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
     def _graph_active(self):
         return bool(getattr(self.args, 'graph_enable', False))
 
+    def _graph_lambda_loss_active(self):
+        return self._graph_active() and bool(getattr(self.args, 'graph_lambda_loss_weighting', False))
+
     def _log_phasec_gating_config(self):
         if not self._phasec_should_log():
             return
@@ -86,11 +89,18 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         print(f'  use_static_bias={self.args.graph_use_static_bias}')
         print(f'  use_dynamic_bias={self.args.graph_use_dynamic_bias}')
         print(f'  use_lambda_gate={self.args.graph_use_lambda_gate}')
+        print(f'  lambda_gate_polarity={self.args.graph_lambda_gate_polarity}')
         print(f'  shuffle_lambda={self.args.graph_shuffle_lambda}')
         print(f'  eval_use_static_bias={self.args.graph_eval_use_static_bias}')
         print(f'  beta_static={self.args.graph_beta_static}')
         print(f'  beta_dynamic={self.args.graph_beta_dynamic}')
+        print(f'  soft_bias_scale_mode={self.args.graph_soft_bias_scale_mode}')
         print(f'  residual_alpha={self.args.graph_residual_alpha}')
+        print(f'  residual_scale_mode={self.args.graph_residual_scale_mode}')
+        print(f'  static_mix_mode={self.args.graph_static_mix_mode}')
+        print(f'  lambda_loss_weighting={self.args.graph_lambda_loss_weighting}')
+        print(f'  lambda_loss_polarity={self.args.graph_lambda_loss_polarity}')
+        print(f'  lambda_loss_alpha={self.args.graph_lambda_loss_alpha}')
 
     def _compute_phasec_sample_weights(self, batch_gating, num_samples, device):
         base = torch.ones(num_samples, device=device)
@@ -113,6 +123,25 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         denom = torch.clamp(weights_raw.mean().detach(), min=1e-8)
         weights_norm = weights_raw / denom
         alpha = float(self.args.phasec_gating_alpha)
+        return 1.0 + alpha * (weights_norm - 1.0)
+
+    def _compute_graph_sample_weights(self, batch_graph_lambda, num_samples, device):
+        base = torch.ones(num_samples, device=device)
+        if not self._graph_lambda_loss_active():
+            return base
+        if batch_graph_lambda is None:
+            raise ValueError('graph_lambda_loss_weighting is active but the dataset did not return graph lambda values')
+        lambda_window = batch_graph_lambda.float().to(device).view(-1)
+        if self.args.graph_lambda_loss_polarity == 'direct':
+            weights_raw = lambda_window
+        elif self.args.graph_lambda_loss_polarity == 'inverse':
+            weights_raw = 1.0 - lambda_window
+        else:
+            raise ValueError(f'Unsupported graph_lambda_loss_polarity: {self.args.graph_lambda_loss_polarity}')
+        weights_raw = torch.clamp(weights_raw, min=1e-6)
+        denom = torch.clamp(weights_raw.mean().detach(), min=1e-8)
+        weights_norm = weights_raw / denom
+        alpha = float(self.args.graph_lambda_loss_alpha)
         return 1.0 + alpha * (weights_norm - 1.0)
 
     @staticmethod
@@ -244,6 +273,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                         loss_raw = criterion(outputs, batch_y)
                         loss_per_sample = loss_raw.mean(dim=(1, 2))
                         sample_weights = self._compute_phasec_sample_weights(batch_gating, loss_per_sample.shape[0], loss_per_sample.device)
+                        sample_weights = sample_weights * self._compute_graph_sample_weights(batch_graph_lambda, loss_per_sample.shape[0], loss_per_sample.device)
                         loss = (loss_per_sample * sample_weights).mean()
                 else:
                     outputs, batch_y = self._forward_batch(
@@ -254,6 +284,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     loss_raw = criterion(outputs, batch_y)
                     loss_per_sample = loss_raw.mean(dim=(1, 2))
                     sample_weights = self._compute_phasec_sample_weights(batch_gating, loss_per_sample.shape[0], loss_per_sample.device)
+                    sample_weights = sample_weights * self._compute_graph_sample_weights(batch_graph_lambda, loss_per_sample.shape[0], loss_per_sample.device)
                     loss = (loss_per_sample * sample_weights).mean()
 
                 train_loss.append(loss.item())

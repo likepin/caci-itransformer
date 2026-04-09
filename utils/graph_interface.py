@@ -92,12 +92,9 @@ def load_graph_train_bundle(root_path, interface_dir, window_starts, expected_no
     manifest = _load_json(manifest_path)
 
     expected_count = len(window_starts)
-    if len(lambda_train) != expected_count:
-        raise ValueError(f'Graph lambda train length {len(lambda_train)} does not match dataset windows {expected_count}')
-    if delta_train.shape[0] != expected_count:
-        raise ValueError(f'Graph delta train length {delta_train.shape[0]} does not match dataset windows {expected_count}')
-    if len(window_index) != expected_count:
-        raise ValueError(f'Graph window index length {len(window_index)} does not match dataset windows {expected_count}')
+    stored_count = len(lambda_train)
+    if delta_train.shape[0] != stored_count or len(window_index) != stored_count:
+        raise ValueError('Graph train bundle files have inconsistent lengths')
     if delta_train.ndim != 3 or delta_train.shape[1] != delta_train.shape[2]:
         raise ValueError(f'Graph delta train must be (B, N, N), got {delta_train.shape}')
     if expected_nodes is not None and delta_train.shape[1] != int(expected_nodes):
@@ -106,10 +103,19 @@ def load_graph_train_bundle(root_path, interface_dir, window_starts, expected_no
     starts_expected = np.asarray(window_starts, dtype=np.int64)
     starts_found = np.asarray([int(item['window_start']) for item in window_index], dtype=np.int64)
     sample_ids = np.asarray([int(item['sample_id']) for item in window_index], dtype=np.int64)
-    if not np.array_equal(sample_ids, np.arange(expected_count, dtype=np.int64)):
+    if not np.array_equal(sample_ids, np.arange(stored_count, dtype=np.int64)):
         raise ValueError('Graph window index sample_id ordering does not match dataset ordering')
-    if not np.array_equal(starts_found, starts_expected):
-        raise ValueError('Graph window starts do not match dataset window_starts')
+    if stored_count == expected_count:
+        if not np.array_equal(starts_found, starts_expected):
+            raise ValueError('Graph window starts do not match dataset window_starts')
+    elif stored_count > expected_count:
+        if not np.array_equal(starts_found[:expected_count], starts_expected):
+            raise ValueError('Graph window starts prefix does not match dataset window_starts')
+        lambda_train = lambda_train[:expected_count]
+        delta_train = delta_train[:expected_count]
+        window_index = window_index[:expected_count]
+    else:
+        raise ValueError(f'Graph lambda train length {stored_count} is shorter than dataset windows {expected_count}')
 
     if shuffle_lambda:
         rng = np.random.RandomState(int(shuffle_seed))

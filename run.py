@@ -40,16 +40,23 @@ if __name__ == '__main__':
     parser.add_argument('--phasec_regime_lambda_hash', type=str, default='', help='optional frozen hash for the Phase C regime lambda artifact')
     parser.add_argument('--phasec_regime_mode', type=str, default='none', choices=['none', 'noop', 'extra_time_feature', 'light_aux_input'], help='Phase C regime integration mode')
     parser.add_argument('--graph_enable', '--phase_d_enable', dest='graph_enable', type=str2bool, nargs='?', const=True, default=False, help='enable train-time graph-guided path')
-    parser.add_argument('--graph_mode', type=str, default='soft_bias', choices=['soft_bias', 'residual_head'], help='how graph information is coupled into the forecasting model when graph guidance is enabled')
+    parser.add_argument('--graph_mode', type=str, default='soft_bias', choices=['soft_bias', 'residual_head', 'static_causal_residual'], help='how graph information is coupled into the forecasting model when graph guidance is enabled')
     parser.add_argument('--graph_interface_dir', '--phase_d_interface_dir', dest='graph_interface_dir', type=str, default='', help='directory that stores the exported graph interface bundle')
     parser.add_argument('--graph_use_static_bias', '--phase_d_use_static_bias', dest='graph_use_static_bias', type=str2bool, nargs='?', const=True, default=True, help='apply static graph bias when graph guidance is enabled')
     parser.add_argument('--graph_use_dynamic_bias', '--phase_d_use_dynamic_bias', dest='graph_use_dynamic_bias', type=str2bool, nargs='?', const=True, default=True, help='apply train-time dynamic graph bias when graph guidance is enabled')
-    parser.add_argument('--graph_use_lambda_gate', '--phase_d_use_lambda_gate', dest='graph_use_lambda_gate', type=str2bool, nargs='?', const=True, default=True, help='gate dynamic graph bias by (1 - lambda^(w)) when enabled')
+    parser.add_argument('--graph_use_lambda_gate', '--phase_d_use_lambda_gate', dest='graph_use_lambda_gate', type=str2bool, nargs='?', const=True, default=True, help='gate dynamic graph path by lambda-derived window weights when enabled')
+    parser.add_argument('--graph_lambda_gate_polarity', type=str, default='inverse', choices=['inverse', 'direct'], help='inverse uses (1 - lambda^(w)); direct uses lambda^(w)')
     parser.add_argument('--graph_shuffle_lambda', '--phase_d_shuffle_lambda', dest='graph_shuffle_lambda', type=str2bool, nargs='?', const=True, default=False, help='shuffle train-window lambda for negative-control runs')
     parser.add_argument('--graph_eval_use_static_bias', '--phase_d_eval_use_static_bias', dest='graph_eval_use_static_bias', type=str2bool, nargs='?', const=True, default=True, help='keep static graph bias enabled at val/test when graph guidance is active')
     parser.add_argument('--graph_beta_static', '--phase_d_beta_static', dest='graph_beta_static', type=float, default=0.10, help='strength of static graph soft bias')
     parser.add_argument('--graph_beta_dynamic', '--phase_d_beta_dynamic', dest='graph_beta_dynamic', type=float, default=0.05, help='strength of dynamic graph soft bias')
-    parser.add_argument('--graph_residual_alpha', type=float, default=0.10, help='strength of the output-side graph residual correction when graph_mode=residual_head')
+    parser.add_argument('--graph_soft_bias_scale_mode', type=str, default='fixed', choices=['fixed', 'learnable'], help='whether soft-bias beta_static/beta_dynamic are fixed hyperparameters or learnable global scalars')
+    parser.add_argument('--graph_residual_alpha', type=float, default=0.10, help='strength of the output-side graph residual correction when graph_mode=residual_head or when graph_static_mix_mode=fixed')
+    parser.add_argument('--graph_residual_scale_mode', type=str, default='fixed', choices=['fixed', 'learnable'], help='whether residual alpha is fixed or learned as a global scalar')
+    parser.add_argument('--graph_static_mix_mode', type=str, default='fixed', choices=['fixed', 'softmax'], help='how static_causal_residual mixes base prediction and static graph residual')
+    parser.add_argument('--graph_lambda_loss_weighting', type=str2bool, nargs='?', const=True, default=False, help='use graph lambda as a sample-weighting signal during training')
+    parser.add_argument('--graph_lambda_loss_polarity', type=str, default='direct', choices=['direct', 'inverse'], help='direct weights up high-lambda windows, inverse weights them down')
+    parser.add_argument('--graph_lambda_loss_alpha', type=float, default=1.0, help='strength shrink for graph lambda loss-weighting after mean-1 normalization')
     parser.add_argument('--seed', type=int, default=2023, help='global random seed')
     parser.add_argument('--features', type=str, default='M',
                         help='forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, S:univariate predict univariate, MS:multivariate predict univariate')
@@ -137,6 +144,8 @@ if __name__ == '__main__':
         raise ValueError('graph_use_lambda_gate requires graph_use_dynamic_bias to be enabled')
     if args.graph_shuffle_lambda and not args.graph_use_lambda_gate:
         raise ValueError('graph_shuffle_lambda only makes sense when graph_use_lambda_gate is enabled')
+    if args.graph_lambda_loss_weighting and not args.graph_enable:
+        raise ValueError('graph_lambda_loss_weighting requires graph_enable so the train bundle can provide lambda')
     if args.graph_eval_use_static_bias and not args.graph_use_static_bias:
         raise ValueError('graph_eval_use_static_bias requires graph_use_static_bias to be enabled')
     if args.graph_beta_static < 0.0:
@@ -145,6 +154,8 @@ if __name__ == '__main__':
         raise ValueError('graph_beta_dynamic must be non-negative')
     if args.graph_residual_alpha < 0.0:
         raise ValueError('graph_residual_alpha must be non-negative')
+    if not (0.0 <= args.graph_lambda_loss_alpha <= 1.0):
+        raise ValueError('graph_lambda_loss_alpha must be in [0, 1]')
 
     random.seed(args.seed)
     np.random.seed(args.seed)
