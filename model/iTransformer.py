@@ -159,7 +159,7 @@ class Model(nn.Module):
                 dynamic_block = gate * dynamic_block
             if graph_bias is None:
                 graph_bias = torch.zeros(batch_size, token_count, token_count, device=device, dtype=torch.float32)
-                graph_bias[:, :num_variates, :num_variates] += dynamic_block
+            graph_bias[:, :num_variates, :num_variates] += dynamic_block
         return graph_bias
 
     def _build_graph_residual(self, variate_tokens, device, graph_lambda=None, graph_delta=None):
