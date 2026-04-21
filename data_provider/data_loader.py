@@ -6,53 +6,81 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import StandardScaler
 from utils.timefeatures import time_features
-from utils.graph_interface import load_graph_train_bundle
+from utils.graph_interface import load_graph_window_bundle
 import warnings
 
 warnings.filterwarnings('ignore')
 
 
-def _init_graph_fields(dataset, flag, graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False, graph_seed=2023):
+def _init_graph_fields(dataset, flag, graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False,
+                       graph_seed=2023, graph_require_lambda=False, graph_require_lambda_eval=False,
+                       graph_require_delta=False):
     dataset.flag = flag
     dataset.graph_enable = bool(graph_enable)
     dataset.graph_interface_dir = graph_interface_dir
     dataset.graph_shuffle_lambda = bool(graph_shuffle_lambda)
     dataset.graph_seed = int(graph_seed)
-    dataset.graph_lambda_train = None
-    dataset.graph_delta_train = None
+    dataset.graph_require_lambda = bool(graph_require_lambda)
+    dataset.graph_require_lambda_eval = bool(graph_require_lambda_eval)
+    dataset.graph_require_delta = bool(graph_require_delta)
+    dataset.graph_lambda_values = None
+    dataset.graph_delta_values = None
+    dataset.graph_node_count = None
     dataset.graph_manifest_path = ''
 
 
-def _attach_graph_train_bundle(dataset):
-    if not getattr(dataset, 'graph_enable', False) or getattr(dataset, 'flag', '') != 'train':
+def _attach_graph_bundle(dataset):
+    if not getattr(dataset, 'graph_enable', False):
+        return
+    needs_lambda = (
+        getattr(dataset, 'graph_require_lambda', False)
+        if dataset.flag == 'train'
+        else getattr(dataset, 'graph_require_lambda_eval', False)
+    )
+    needs_delta = dataset.flag == 'train' and getattr(dataset, 'graph_require_delta', False)
+    if not needs_lambda and not needs_delta:
         return
     if hasattr(dataset, 'window_starts'):
         window_starts = np.asarray(dataset.window_starts, dtype=np.int64)
     else:
         max_start = len(dataset.data_x) - dataset.seq_len - dataset.pred_len + 1
         window_starts = np.arange(max_start, dtype=np.int64)
-    bundle = load_graph_train_bundle(
+    bundle = load_graph_window_bundle(
         root_path=dataset.root_path,
         interface_dir=dataset.graph_interface_dir,
+        split=dataset.flag,
         window_starts=window_starts,
         expected_nodes=dataset.data_x.shape[1],
-        shuffle_lambda=dataset.graph_shuffle_lambda,
+        shuffle_lambda=(dataset.flag == 'train' and dataset.graph_shuffle_lambda),
         shuffle_seed=dataset.graph_seed,
+        require_delta=needs_delta,
     )
-    dataset.graph_lambda_train = bundle['lambda_train']
-    dataset.graph_delta_train = bundle['delta_train']
+    dataset.graph_lambda_values = bundle['lambda_values']
+    dataset.graph_delta_values = bundle['delta_values']
+    dataset.graph_node_count = int(dataset.data_x.shape[1])
     dataset.graph_manifest_path = bundle['manifest_path']
-    print(f'Graph train interface bundle ({dataset.flag}): {bundle["interface_dir"]}')
-    print(f'Graph train windows ({dataset.flag}): {len(dataset.graph_lambda_train)}')
-    if dataset.graph_shuffle_lambda:
+    print(f'Graph interface bundle ({dataset.flag}): {bundle["interface_dir"]}')
+    print(f'Graph windows ({dataset.flag}): {len(dataset.graph_lambda_values)}')
+    if not needs_delta:
+        print(f'Graph delta ({dataset.flag}): not required by this mode; using per-sample zero placeholder')
+    if dataset.flag == 'train' and dataset.graph_shuffle_lambda:
         print(f'Graph lambda shuffle ({dataset.flag}): enabled with seed={dataset.graph_seed}')
+
+
+def _graph_sample(dataset, index):
+    graph_lambda = np.float32(dataset.graph_lambda_values[index])
+    if dataset.graph_delta_values is not None:
+        return graph_lambda, dataset.graph_delta_values[index]
+    node_count = int(dataset.graph_node_count or dataset.data_x.shape[1])
+    return graph_lambda, np.zeros((node_count, node_count), dtype=np.float32)
 
 
 class Dataset_ETT_hour(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
                  target='OT', scale=True, timeenc=0, freq='h',
-                 graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False, graph_seed=2023):
+                 graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False, graph_seed=2023,
+                 graph_require_lambda=False, graph_require_lambda_eval=False, graph_require_delta=False):
         # size [seq_len, label_len, pred_len]
         # info
         if size == None:
@@ -68,7 +96,10 @@ class Dataset_ETT_hour(Dataset):
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
         _init_graph_fields(self, flag, graph_enable=graph_enable, graph_interface_dir=graph_interface_dir,
-                           graph_shuffle_lambda=graph_shuffle_lambda, graph_seed=graph_seed)
+                           graph_shuffle_lambda=graph_shuffle_lambda, graph_seed=graph_seed,
+                           graph_require_lambda=graph_require_lambda,
+                           graph_require_lambda_eval=graph_require_lambda_eval,
+                           graph_require_delta=graph_require_delta)
 
         self.features = features
         self.target = target
@@ -118,7 +149,7 @@ class Dataset_ETT_hour(Dataset):
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]
         self.data_stamp = data_stamp
-        _attach_graph_train_bundle(self)
+        _attach_graph_bundle(self)
 
     def __getitem__(self, index):
         s_begin = index
@@ -131,8 +162,9 @@ class Dataset_ETT_hour(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
-        if self.graph_lambda_train is not None:
-            return seq_x, seq_y, seq_x_mark, seq_y_mark, np.float32(self.graph_lambda_train[index]), self.graph_delta_train[index]
+        if self.graph_lambda_values is not None:
+            graph_lambda, graph_delta = _graph_sample(self, index)
+            return seq_x, seq_y, seq_x_mark, seq_y_mark, graph_lambda, graph_delta
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
@@ -146,7 +178,8 @@ class Dataset_ETT_minute(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTm1.csv',
                  target='OT', scale=True, timeenc=0, freq='t',
-                 graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False, graph_seed=2023):
+                 graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False, graph_seed=2023,
+                 graph_require_lambda=False, graph_require_lambda_eval=False, graph_require_delta=False):
         # size [seq_len, label_len, pred_len]
         # info
         if size == None:
@@ -162,7 +195,10 @@ class Dataset_ETT_minute(Dataset):
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
         _init_graph_fields(self, flag, graph_enable=graph_enable, graph_interface_dir=graph_interface_dir,
-                           graph_shuffle_lambda=graph_shuffle_lambda, graph_seed=graph_seed)
+                           graph_shuffle_lambda=graph_shuffle_lambda, graph_seed=graph_seed,
+                           graph_require_lambda=graph_require_lambda,
+                           graph_require_lambda_eval=graph_require_lambda_eval,
+                           graph_require_delta=graph_require_delta)
 
         self.features = features
         self.target = target
@@ -214,7 +250,7 @@ class Dataset_ETT_minute(Dataset):
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]
         self.data_stamp = data_stamp
-        _attach_graph_train_bundle(self)
+        _attach_graph_bundle(self)
 
     def __getitem__(self, index):
         s_begin = index
@@ -227,8 +263,9 @@ class Dataset_ETT_minute(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
-        if self.graph_lambda_train is not None:
-            return seq_x, seq_y, seq_x_mark, seq_y_mark, np.float32(self.graph_lambda_train[index]), self.graph_delta_train[index]
+        if self.graph_lambda_values is not None:
+            graph_lambda, graph_delta = _graph_sample(self, index)
+            return seq_x, seq_y, seq_x_mark, seq_y_mark, graph_lambda, graph_delta
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
@@ -242,7 +279,8 @@ class Dataset_Custom(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
                  target='OT', scale=True, timeenc=0, freq='h',
-                 graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False, graph_seed=2023):
+                 graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False, graph_seed=2023,
+                 graph_require_lambda=False, graph_require_lambda_eval=False, graph_require_delta=False):
         # size [seq_len, label_len, pred_len]
         # info
         if size == None:
@@ -258,7 +296,10 @@ class Dataset_Custom(Dataset):
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
         _init_graph_fields(self, flag, graph_enable=graph_enable, graph_interface_dir=graph_interface_dir,
-                           graph_shuffle_lambda=graph_shuffle_lambda, graph_seed=graph_seed)
+                           graph_shuffle_lambda=graph_shuffle_lambda, graph_seed=graph_seed,
+                           graph_require_lambda=graph_require_lambda,
+                           graph_require_lambda_eval=graph_require_lambda_eval,
+                           graph_require_delta=graph_require_delta)
 
         self.features = features
         self.target = target
@@ -318,7 +359,7 @@ class Dataset_Custom(Dataset):
         self.data_x = data[border1:border2]
         self.data_y = data[border1:border2]
         self.data_stamp = data_stamp
-        _attach_graph_train_bundle(self)
+        _attach_graph_bundle(self)
 
     def __getitem__(self, index):
         s_begin = index
@@ -331,8 +372,9 @@ class Dataset_Custom(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
-        if self.graph_lambda_train is not None:
-            return seq_x, seq_y, seq_x_mark, seq_y_mark, np.float32(self.graph_lambda_train[index]), self.graph_delta_train[index]
+        if self.graph_lambda_values is not None:
+            graph_lambda, graph_delta = _graph_sample(self, index)
+            return seq_x, seq_y, seq_x_mark, seq_y_mark, graph_lambda, graph_delta
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
@@ -349,7 +391,8 @@ class Dataset_PhaseC_Synthetic(Dataset):
                  features='S', data_path='X.npy', target='OT', scale=True, timeenc=0, freq='h',
                  phasec_split_path=None, phasec_gating_lambda_path=None, phasec_gating_mode='none',
                  phasec_regime_lambda_path=None, phasec_regime_mode='none',
-                 graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False, graph_seed=2023):
+                 graph_enable=False, graph_interface_dir='', graph_shuffle_lambda=False, graph_seed=2023,
+                 graph_require_lambda=False, graph_require_lambda_eval=False, graph_require_delta=False):
         if size is None:
             self.seq_len = 24 * 4 * 4
             self.label_len = 24 * 4
@@ -361,7 +404,10 @@ class Dataset_PhaseC_Synthetic(Dataset):
 
         assert flag in ['train', 'test', 'val']
         _init_graph_fields(self, flag, graph_enable=graph_enable, graph_interface_dir=graph_interface_dir,
-                           graph_shuffle_lambda=graph_shuffle_lambda, graph_seed=graph_seed)
+                           graph_shuffle_lambda=graph_shuffle_lambda, graph_seed=graph_seed,
+                           graph_require_lambda=graph_require_lambda,
+                           graph_require_lambda_eval=graph_require_lambda_eval,
+                           graph_require_delta=graph_require_delta)
         self.features = features
         self.target = target
         self.scale = scale
@@ -514,7 +560,7 @@ class Dataset_PhaseC_Synthetic(Dataset):
         self.window_starts = self._build_valid_starts(active_intervals)
         if len(self.window_starts) == 0:
             raise ValueError(f'No valid windows available for split {self.flag}')
-        _attach_graph_train_bundle(self)
+        _attach_graph_bundle(self)
 
         print(f'PhaseC split artifact ({self.flag}): {self.split_artifact_path}')
         print(f'PhaseC intervals ({self.flag}): {self.split_intervals}')
@@ -562,10 +608,11 @@ class Dataset_PhaseC_Synthetic(Dataset):
                 seq_x_mark = np.concatenate([seq_x_mark.astype(np.float32), regime_x_aux], axis=1)
                 seq_y_mark = np.concatenate([seq_y_mark.astype(np.float32), regime_y_aux], axis=1)
 
-        if self.graph_lambda_train is not None:
+        if self.graph_lambda_values is not None:
             if sample_index is None:
-                raise ValueError('Graph train bundle requires a dataset sample index for alignment')
-            return seq_x, seq_y, seq_x_mark, seq_y_mark, gating_future, regime_x_aux, regime_y_aux, np.float32(self.graph_lambda_train[sample_index]), self.graph_delta_train[sample_index]
+                raise ValueError('Graph interface bundle requires a dataset sample index for alignment')
+            graph_lambda, graph_delta = _graph_sample(self, sample_index)
+            return seq_x, seq_y, seq_x_mark, seq_y_mark, gating_future, regime_x_aux, regime_y_aux, graph_lambda, graph_delta
         return seq_x, seq_y, seq_x_mark, seq_y_mark, gating_future, regime_x_aux, regime_y_aux
 
     def __getitem__(self, index):

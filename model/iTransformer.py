@@ -5,7 +5,7 @@ from layers.Transformer_EncDec import Encoder, EncoderLayer
 from layers.SelfAttention_Family import FullAttention, AttentionLayer
 from layers.Embed import DataEmbedding_inverted
 import numpy as np
-from utils.graph_interface import load_graph_static_bundle
+from utils.graph_interface import load_graph_lambda_train_stats, load_graph_static_bundle
 
 
 class Model(nn.Module):
@@ -37,6 +37,15 @@ class Model(nn.Module):
         self.graph_residual_alpha = float(getattr(configs, 'graph_residual_alpha', 0.0))
         self.graph_residual_scale_mode = getattr(configs, 'graph_residual_scale_mode', 'fixed')
         self.graph_static_mix_mode = getattr(configs, 'graph_static_mix_mode', 'fixed')
+        self.graph_lambda_logit_bias = bool(getattr(configs, 'graph_lambda_logit_bias', False))
+        self.graph_lambda_logit_bias_polarity = getattr(configs, 'graph_lambda_logit_bias_polarity', 'favor_base')
+        self.graph_causal_pool_mode = getattr(configs, 'graph_causal_pool_mode', 'auto')
+        self.graph_causal_pool_budget_mb = float(getattr(configs, 'graph_causal_pool_budget_mb', 512.0))
+        self.graph_support_topk = int(getattr(configs, 'graph_support_topk', 32))
+        self.graph_support_topk_metric = getattr(configs, 'graph_support_topk_metric', 'abs_a_base')
+        self.graph_pool_dim = int(getattr(configs, 'graph_pool_dim', 64))
+        self.graph_causal_pool_mode_resolved = None
+        self.graph_causal_pool_estimated_mb = None
         self.graph_manifest_path = ''
         self.graph_interface_dir = getattr(configs, 'graph_interface_dir', '')
         if self.phasec_regime_mode == 'light_aux_input':
@@ -54,15 +63,80 @@ class Model(nn.Module):
             self.register_buffer('graph_a_base', torch.from_numpy(static_bundle['a_base']).float())
             self.register_buffer('graph_support', torch.from_numpy(static_bundle['support']).float())
             self.graph_manifest_path = static_bundle['manifest_path']
+            if self.graph_mode == 'static_causal_residual':
+                resolved_mode, dispatch_stats = self._resolve_static_causal_pool_mode(
+                    num_variates=self.graph_support.shape[0],
+                    batch_size=int(getattr(configs, 'batch_size', 1)),
+                    d_model=configs.d_model,
+                    use_amp=bool(getattr(configs, 'use_amp', False)),
+                )
+                self.graph_causal_pool_mode_resolved = resolved_mode
+                self.graph_causal_pool_estimated_mb = dispatch_stats['estimated_mlp_mb']
+                if resolved_mode == 'dotprod':
+                    causal_support, support_stats = self._build_static_topk_support(
+                        support=self.graph_support > 0.0,
+                        a_base=self.graph_a_base,
+                    )
+                else:
+                    causal_support, support_stats = self._build_static_full_support(
+                        support=self.graph_support > 0.0,
+                    )
+                self.register_buffer('graph_causal_support', causal_support)
+                print(
+                    '[Graph] causal_pool_mode='
+                    f'{self.graph_causal_pool_mode} -> resolved={resolved_mode} '
+                    f'| est_mlp_mb={dispatch_stats["estimated_mlp_mb"]:.1f} '
+                    f'| budget_mb={self.graph_causal_pool_budget_mb:.1f}'
+                )
+                support_label = 'topk' if resolved_mode == 'dotprod' else 'full'
+                support_suffix = (
+                    f' {support_label}={self.graph_support_topk} pool_dim={self.graph_pool_dim}'
+                    if resolved_mode == 'dotprod' else ''
+                )
+                print(
+                    '[Graph] static support '
+                    f'raw_avg_parents={support_stats["raw_avg_parents"]:.2f} '
+                    f'{support_label}_avg_parents={support_stats["active_avg_parents"]:.2f} '
+                    f'raw_density={support_stats["raw_density"]:.4f} '
+                    f'{support_label}_density={support_stats["active_density"]:.4f}'
+                    f'{support_suffix}'
+                )
+            else:
+                self.graph_causal_support = None
         else:
             self.graph_a_base = None
             self.graph_support = None
+            self.graph_causal_support = None
         if self.graph_enable and self.graph_mode == 'soft_bias' and self.graph_soft_bias_scale_mode == 'learnable':
             self.graph_beta_static_log = nn.Parameter(torch.log(torch.tensor(max(self.graph_beta_static, 1e-6), dtype=torch.float32)))
             self.graph_beta_dynamic_log = nn.Parameter(torch.log(torch.tensor(max(self.graph_beta_dynamic, 1e-6), dtype=torch.float32)))
         else:
             self.graph_beta_static_log = None
             self.graph_beta_dynamic_log = None
+        if self.graph_lambda_logit_bias and not (
+            self.graph_enable and self.graph_mode == 'static_causal_residual' and self.graph_static_mix_mode == 'softmax'
+        ):
+            raise ValueError(
+                'graph_lambda_logit_bias requires graph_enable=True, graph_mode=static_causal_residual, '
+                'and graph_static_mix_mode=softmax'
+            )
+        if self.graph_lambda_logit_bias:
+            lambda_stats = load_graph_lambda_train_stats(
+                root_path=getattr(configs, 'root_path', ''),
+                interface_dir=self.graph_interface_dir,
+            )
+            self.register_buffer('graph_lambda_train_mean', torch.tensor(lambda_stats['lambda_mean'], dtype=torch.float32))
+            self.graph_lambda_train_count = int(lambda_stats['lambda_count'])
+            print(
+                '[Graph] lambda logit bias '
+                f'polarity={self.graph_lambda_logit_bias_polarity} '
+                f'mean={lambda_stats["lambda_mean"]:.6f} '
+                f'std={lambda_stats["lambda_std"]:.6f} '
+                f'count={lambda_stats["lambda_count"]}'
+            )
+        else:
+            self.graph_lambda_train_mean = None
+            self.graph_lambda_train_count = 0
         if self.graph_enable and self.graph_mode in {'residual_head', 'static_causal_residual'} and (
             self.graph_mode == 'static_causal_residual' or self.graph_use_static_bias or self.graph_use_dynamic_bias
         ):
@@ -81,7 +155,7 @@ class Model(nn.Module):
             self.graph_residual_alpha_log = nn.Parameter(torch.log(torch.tensor(max(self.graph_residual_alpha, 1e-6), dtype=torch.float32)))
         else:
             self.graph_residual_alpha_log = None
-        if self.graph_enable and self.graph_mode == 'static_causal_residual':
+        if self.graph_enable and self.graph_mode == 'static_causal_residual' and self.graph_causal_pool_mode_resolved == 'mlp':
             static_pool_dim = configs.d_model * 2
             self.graph_causal_pool_norm = nn.LayerNorm(static_pool_dim)
             self.graph_causal_pool_head = nn.Sequential(
@@ -93,6 +167,14 @@ class Model(nn.Module):
         else:
             self.graph_causal_pool_norm = None
             self.graph_causal_pool_head = None
+        if self.graph_enable and self.graph_mode == 'static_causal_residual' and self.graph_causal_pool_mode_resolved == 'dotprod':
+            self.graph_causal_query = nn.Linear(configs.d_model, self.graph_pool_dim, bias=False)
+            self.graph_causal_key = nn.Linear(configs.d_model, self.graph_pool_dim, bias=False)
+            self.graph_causal_scale = self.graph_pool_dim ** -0.5
+        else:
+            self.graph_causal_query = None
+            self.graph_causal_key = None
+            self.graph_causal_scale = None
         if self.graph_enable and self.graph_mode == 'static_causal_residual' and self.graph_static_mix_mode == 'softmax':
             static_mix_dim = configs.d_model * 2
             self.graph_static_mix_norm = nn.LayerNorm(static_mix_dim)
@@ -105,6 +187,10 @@ class Model(nn.Module):
         else:
             self.graph_static_mix_norm = None
             self.graph_static_mix_head = None
+        if self.graph_lambda_logit_bias:
+            self.graph_lambda_logit_bias_raw = nn.Parameter(torch.tensor(-4.0, dtype=torch.float32))
+        else:
+            self.graph_lambda_logit_bias_raw = None
         # Encoder-only architecture
         self.encoder = Encoder(
             [
@@ -138,6 +224,73 @@ class Model(nn.Module):
         if self.graph_residual_scale_mode == 'learnable' and self.graph_residual_alpha_log is not None:
             return torch.exp(self.graph_residual_alpha_log)
         return self.graph_residual_alpha
+
+    def _graph_lambda_logit_bias_scale(self):
+        if self.graph_lambda_logit_bias_raw is None:
+            return None
+        return F.softplus(self.graph_lambda_logit_bias_raw)
+
+    @staticmethod
+    def _estimate_mlp_pool_mb(num_variates, batch_size, d_model, use_amp):
+        dtype_bytes = 2 if use_amp else 4
+        estimated_bytes = float(batch_size) * float(num_variates ** 2) * float(3 * d_model + 1) * float(dtype_bytes)
+        return estimated_bytes / (1024.0 ** 2)
+
+    def _resolve_static_causal_pool_mode(self, num_variates, batch_size, d_model, use_amp):
+        estimated_mlp_mb = self._estimate_mlp_pool_mb(
+            num_variates=num_variates,
+            batch_size=batch_size,
+            d_model=d_model,
+            use_amp=use_amp,
+        )
+        if self.graph_causal_pool_mode == 'auto':
+            resolved_mode = 'mlp' if estimated_mlp_mb <= self.graph_causal_pool_budget_mb else 'dotprod'
+        else:
+            resolved_mode = self.graph_causal_pool_mode
+        dispatch_stats = {
+            'estimated_mlp_mb': estimated_mlp_mb,
+        }
+        return resolved_mode, dispatch_stats
+
+    @staticmethod
+    def _build_static_full_support(support):
+        support_mask = support.bool().clone()
+        support_mask.fill_diagonal_(False)
+        counts = support_mask.sum(dim=-1)
+        density = support_mask.float().mean().item()
+        support_stats = {
+            'raw_avg_parents': counts.float().mean().item(),
+            'active_avg_parents': counts.float().mean().item(),
+            'raw_density': density,
+            'active_density': density,
+        }
+        return support_mask, support_stats
+
+    def _build_static_topk_support(self, support, a_base):
+        support_mask, base_stats = self._build_static_full_support(support=support)
+
+        if self.graph_support_topk_metric != 'abs_a_base':
+            raise ValueError(f'Unsupported graph_support_topk_metric: {self.graph_support_topk_metric}')
+
+        if self.graph_support_topk <= 0 or self.graph_support_topk >= support_mask.shape[1]:
+            pruned_support = support_mask
+        else:
+            ranking_scores = a_base.abs().masked_fill(~support_mask, float('-inf'))
+            topk = min(self.graph_support_topk, support_mask.shape[1])
+            topk_indices = torch.topk(ranking_scores, k=topk, dim=-1).indices
+            topk_mask = torch.zeros_like(support_mask, dtype=torch.bool)
+            topk_mask.scatter_(1, topk_indices, True)
+            pruned_support = support_mask & topk_mask
+
+        pruned_counts = pruned_support.sum(dim=-1)
+        pruned_density = pruned_support.float().mean().item()
+        support_stats = {
+            'raw_avg_parents': base_stats['raw_avg_parents'],
+            'active_avg_parents': pruned_counts.float().mean().item(),
+            'raw_density': base_stats['raw_density'],
+            'active_density': pruned_density,
+        }
+        return pruned_support, support_stats
 
     def _build_graph_bias(self, batch_size, token_count, num_variates, device, graph_lambda=None, graph_delta=None):
         if self.graph_mode != 'soft_bias':
@@ -195,34 +348,55 @@ class Model(nn.Module):
         return self._graph_residual_scale() * residual_tokens.permute(0, 2, 1)
 
     def _build_static_causal_pool(self, variate_tokens, device):
-        if self.graph_causal_pool_head is None or self.graph_causal_pool_norm is None:
-            raise ValueError('static_causal_residual requires graph_causal_pool_head to be initialized')
-
         batch_size, num_variates, _ = variate_tokens.shape
-        causal_mask = self.graph_support.to(device).clone()
-        causal_mask.fill_diagonal_(0.0)
+        causal_mask = self.graph_causal_support.to(device)
+        if causal_mask.shape[0] != num_variates or causal_mask.shape[1] != num_variates:
+            raise ValueError(
+                f'graph_causal_support shape {tuple(causal_mask.shape)} does not match variate count {num_variates}'
+            )
 
-        target_tokens = variate_tokens.unsqueeze(2).expand(-1, -1, num_variates, -1)
-        source_tokens = variate_tokens.unsqueeze(1).expand(-1, num_variates, -1, -1)
-        pool_input = torch.cat([target_tokens, source_tokens], dim=-1)
-        pool_scores = self.graph_causal_pool_head(self.graph_causal_pool_norm(pool_input)).squeeze(-1)
+        if self.graph_causal_pool_mode_resolved == 'mlp':
+            if self.graph_causal_pool_head is None or self.graph_causal_pool_norm is None:
+                raise ValueError('static_causal_residual with graph_causal_pool_mode=mlp requires graph_causal_pool_head to be initialized')
+            target_tokens = variate_tokens.unsqueeze(2).expand(-1, -1, num_variates, -1)
+            source_tokens = variate_tokens.unsqueeze(1).expand(-1, num_variates, -1, -1)
+            pool_input = torch.cat([target_tokens, source_tokens], dim=-1)
+            pool_scores = self.graph_causal_pool_head(self.graph_causal_pool_norm(pool_input)).squeeze(-1)
+            mask = causal_mask.unsqueeze(0).expand(batch_size, -1, -1)
+            has_parent = causal_mask.any(dim=-1, keepdim=True).unsqueeze(0)
+            pool_scores = pool_scores.masked_fill(~mask, -1e9)
+            pool_scores = torch.where(has_parent.expand_as(pool_scores), pool_scores, torch.zeros_like(pool_scores))
+            pool_weights = torch.softmax(pool_scores, dim=-1) * mask.to(pool_scores.dtype)
+            pool_weights = torch.where(
+                has_parent,
+                pool_weights / pool_weights.sum(dim=-1, keepdim=True).clamp_min(1e-6),
+                torch.zeros_like(pool_weights),
+            )
+            return torch.einsum('bts,bse->bte', pool_weights, variate_tokens)
 
-        mask = causal_mask.unsqueeze(0).expand(batch_size, -1, -1)
-        has_parent = (causal_mask.sum(dim=-1, keepdim=True) > 0).unsqueeze(0)
-        pool_scores = pool_scores.masked_fill(mask <= 0.0, -1e9)
-        pool_scores = torch.where(has_parent.expand_as(pool_scores), pool_scores, torch.zeros_like(pool_scores))
-        pool_weights = torch.softmax(pool_scores, dim=-1) * mask
-        pool_weights = torch.where(
-            has_parent,
-            pool_weights / pool_weights.sum(dim=-1, keepdim=True).clamp_min(1e-6),
-            torch.zeros_like(pool_weights),
-        )
-        return torch.einsum('bts,bse->bte', pool_weights, variate_tokens)
+        if self.graph_causal_pool_mode_resolved == 'dotprod':
+            if self.graph_causal_query is None or self.graph_causal_key is None:
+                raise ValueError('static_causal_residual with graph_causal_pool_mode=dotprod requires graph_causal_query/key to be initialized')
+            query = self.graph_causal_query(variate_tokens)
+            key = self.graph_causal_key(variate_tokens)
+            pool_scores = torch.matmul(query, key.transpose(1, 2)) * self.graph_causal_scale
+            mask = causal_mask.unsqueeze(0).expand(batch_size, -1, -1)
+            has_parent = causal_mask.any(dim=-1, keepdim=True).unsqueeze(0)
+            min_value = torch.finfo(pool_scores.dtype).min
+            pool_scores = pool_scores.masked_fill(~mask, min_value)
+            pool_scores = torch.where(has_parent.expand_as(pool_scores), pool_scores, torch.zeros_like(pool_scores))
+            pool_weights = torch.softmax(pool_scores, dim=-1) * mask.to(pool_scores.dtype)
+            pool_weights = torch.where(
+                has_parent,
+                pool_weights / pool_weights.sum(dim=-1, keepdim=True).clamp_min(1e-6),
+                torch.zeros_like(pool_weights),
+            )
+            return torch.einsum('bts,bse->bte', pool_weights, variate_tokens)
 
-    def _build_static_causal_residual(self, variate_tokens, device):
+        raise ValueError(f'Unsupported resolved graph_causal_pool_mode: {self.graph_causal_pool_mode_resolved}')
+
+    def _build_static_causal_residual(self, variate_tokens, device, graph_lambda=None):
         if not self.graph_enable or self.graph_mode != 'static_causal_residual' or self.graph_residual_head is None:
-            return None, None
-        if not self.graph_use_static_bias:
             return None, None
 
         causal_pool = self._build_static_causal_pool(variate_tokens=variate_tokens, device=device)
@@ -235,6 +409,13 @@ class Model(nn.Module):
                 raise ValueError('graph_static_mix_mode=softmax requires graph_static_mix_head to be initialized')
             mix_input = torch.cat([variate_tokens, causal_pool], dim=-1)
             mix_logits = self.graph_static_mix_head(self.graph_static_mix_norm(mix_input))
+            lambda_logit_bias = self._build_graph_lambda_logit_bias(
+                graph_lambda=graph_lambda,
+                batch_size=variate_tokens.shape[0],
+                device=device,
+            )
+            if lambda_logit_bias is not None:
+                mix_logits = mix_logits + lambda_logit_bias
             mix_weights = torch.softmax(mix_logits, dim=-1)
             return residual_tokens, mix_weights
 
@@ -247,6 +428,21 @@ class Model(nn.Module):
         if self.graph_lambda_gate_polarity == 'direct':
             return gate
         raise ValueError(f'Unsupported graph_lambda_gate_polarity: {self.graph_lambda_gate_polarity}')
+
+    def _build_graph_lambda_logit_bias(self, graph_lambda, batch_size, device):
+        if not self.graph_lambda_logit_bias:
+            return None
+        if graph_lambda is None:
+            raise ValueError('graph_lambda_logit_bias is enabled but graph_lambda was not provided for the batch')
+        lambda_centered = graph_lambda.float().to(device).view(batch_size, 1, 1)
+        lambda_centered = lambda_centered - self.graph_lambda_train_mean.to(device).view(1, 1, 1)
+        if self.graph_lambda_logit_bias_polarity == 'favor_base':
+            direction = torch.tensor([1.0, -1.0], dtype=lambda_centered.dtype, device=device).view(1, 1, 2)
+        elif self.graph_lambda_logit_bias_polarity == 'favor_static':
+            direction = torch.tensor([-1.0, 1.0], dtype=lambda_centered.dtype, device=device).view(1, 1, 2)
+        else:
+            raise ValueError(f'Unsupported graph_lambda_logit_bias_polarity: {self.graph_lambda_logit_bias_polarity}')
+        return self._graph_lambda_logit_bias_scale() * lambda_centered * direction
 
     def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec, regime_aux_enc=None, regime_aux_dec=None,
                  graph_lambda=None, graph_delta=None):
@@ -291,6 +487,7 @@ class Model(nn.Module):
             graph_residual, graph_mix_weights = self._build_static_causal_residual(
                 variate_tokens=enc_out[:, :N, :],
                 device=enc_out.device,
+                graph_lambda=graph_lambda,
             )
             if graph_residual is not None:
                 if graph_mix_weights is not None:

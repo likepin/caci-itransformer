@@ -54,6 +54,13 @@ if __name__ == '__main__':
     parser.add_argument('--graph_residual_alpha', type=float, default=0.10, help='strength of the output-side graph residual correction when graph_mode=residual_head or when graph_static_mix_mode=fixed')
     parser.add_argument('--graph_residual_scale_mode', type=str, default='fixed', choices=['fixed', 'learnable'], help='whether residual alpha is fixed or learned as a global scalar')
     parser.add_argument('--graph_static_mix_mode', type=str, default='fixed', choices=['fixed', 'softmax'], help='how static_causal_residual mixes base prediction and static graph residual')
+    parser.add_argument('--graph_lambda_logit_bias', type=str2bool, nargs='?', const=True, default=False, help='inject centered graph lambda as a constrained bias on static_causal_residual softmax mix logits')
+    parser.add_argument('--graph_lambda_logit_bias_polarity', type=str, default='favor_base', choices=['favor_base', 'favor_static'], help='favor_base pushes high-lambda windows toward base; favor_static pushes them toward static correction')
+    parser.add_argument('--graph_causal_pool_mode', type=str, default='auto', choices=['auto', 'mlp', 'dotprod'], help='backend used to build static causal pooling for static_causal_residual')
+    parser.add_argument('--graph_causal_pool_budget_mb', type=float, default=512.0, help='memory budget used by graph_causal_pool_mode=auto to decide whether MLP-based pairwise scoring is allowed')
+    parser.add_argument('--graph_support_topk', type=int, default=32, help='fixed per-target parent budget used by dot-product static causal pooling; <=0 keeps the full support')
+    parser.add_argument('--graph_support_topk_metric', type=str, default='abs_a_base', choices=['abs_a_base'], help='ranking metric used to prune static support before dot-product causal pooling')
+    parser.add_argument('--graph_pool_dim', type=int, default=64, help='projection dimension for dot-product static causal pooling')
     parser.add_argument('--graph_lambda_loss_weighting', type=str2bool, nargs='?', const=True, default=False, help='use graph lambda as a sample-weighting signal during training')
     parser.add_argument('--graph_lambda_loss_polarity', type=str, default='direct', choices=['direct', 'inverse'], help='direct weights up high-lambda windows, inverse weights them down')
     parser.add_argument('--graph_lambda_loss_alpha', type=float, default=1.0, help='strength shrink for graph lambda loss-weighting after mean-1 normalization')
@@ -146,7 +153,13 @@ if __name__ == '__main__':
         raise ValueError('graph_shuffle_lambda only makes sense when graph_use_lambda_gate is enabled')
     if args.graph_lambda_loss_weighting and not args.graph_enable:
         raise ValueError('graph_lambda_loss_weighting requires graph_enable so the train bundle can provide lambda')
-    if args.graph_eval_use_static_bias and not args.graph_use_static_bias:
+    if args.graph_lambda_logit_bias and not args.graph_enable:
+        raise ValueError('graph_lambda_logit_bias requires graph_enable so the train bundle can provide lambda')
+    if args.graph_lambda_logit_bias and args.graph_mode != 'static_causal_residual':
+        raise ValueError('graph_lambda_logit_bias only supports graph_mode=static_causal_residual')
+    if args.graph_lambda_logit_bias and args.graph_static_mix_mode != 'softmax':
+        raise ValueError('graph_lambda_logit_bias requires graph_static_mix_mode=softmax')
+    if args.graph_mode != 'static_causal_residual' and args.graph_eval_use_static_bias and not args.graph_use_static_bias:
         raise ValueError('graph_eval_use_static_bias requires graph_use_static_bias to be enabled')
     if args.graph_beta_static < 0.0:
         raise ValueError('graph_beta_static must be non-negative')
@@ -154,6 +167,10 @@ if __name__ == '__main__':
         raise ValueError('graph_beta_dynamic must be non-negative')
     if args.graph_residual_alpha < 0.0:
         raise ValueError('graph_residual_alpha must be non-negative')
+    if args.graph_causal_pool_budget_mb <= 0.0:
+        raise ValueError('graph_causal_pool_budget_mb must be positive')
+    if args.graph_pool_dim <= 0:
+        raise ValueError('graph_pool_dim must be positive')
     if not (0.0 <= args.graph_lambda_loss_alpha <= 1.0):
         raise ValueError('graph_lambda_loss_alpha must be in [0, 1]')
 

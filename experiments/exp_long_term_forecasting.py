@@ -86,18 +86,44 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         print('Graph-guided config:')
         print(f'  mode={self.args.graph_mode}')
         print(f'  interface_dir={self.args.graph_interface_dir}')
-        print(f'  use_static_bias={self.args.graph_use_static_bias}')
-        print(f'  use_dynamic_bias={self.args.graph_use_dynamic_bias}')
-        print(f'  use_lambda_gate={self.args.graph_use_lambda_gate}')
+        if self.args.graph_mode == 'static_causal_residual':
+            print(
+                '  use_static_bias='
+                f'{self.args.graph_use_static_bias} '
+                '(ignored by static_causal_residual forward path; static branch is controlled by graph_enable + graph_mode)'
+            )
+            print(
+                '  use_dynamic_bias='
+                f'{self.args.graph_use_dynamic_bias} '
+                '(ignored by static_causal_residual forward path; graph_delta is not used in this mode)'
+            )
+            print(
+                '  use_lambda_gate='
+                f'{self.args.graph_use_lambda_gate} '
+                '(ignored by static_causal_residual forward path unless a future dynamic branch is added to this mode)'
+            )
+        else:
+            print(f'  use_static_bias={self.args.graph_use_static_bias}')
+            print(f'  use_dynamic_bias={self.args.graph_use_dynamic_bias}')
+            print(f'  use_lambda_gate={self.args.graph_use_lambda_gate}')
         print(f'  lambda_gate_polarity={self.args.graph_lambda_gate_polarity}')
         print(f'  shuffle_lambda={self.args.graph_shuffle_lambda}')
-        print(f'  eval_use_static_bias={self.args.graph_eval_use_static_bias}')
+        if self.args.graph_mode == 'static_causal_residual':
+            print(
+                '  eval_use_static_bias='
+                f'{self.args.graph_eval_use_static_bias} '
+                '(ignored by static_causal_residual forward path)'
+            )
+        else:
+            print(f'  eval_use_static_bias={self.args.graph_eval_use_static_bias}')
         print(f'  beta_static={self.args.graph_beta_static}')
         print(f'  beta_dynamic={self.args.graph_beta_dynamic}')
         print(f'  soft_bias_scale_mode={self.args.graph_soft_bias_scale_mode}')
         print(f'  residual_alpha={self.args.graph_residual_alpha}')
         print(f'  residual_scale_mode={self.args.graph_residual_scale_mode}')
         print(f'  static_mix_mode={self.args.graph_static_mix_mode}')
+        print(f'  lambda_logit_bias={self.args.graph_lambda_logit_bias}')
+        print(f'  lambda_logit_bias_polarity={self.args.graph_lambda_logit_bias_polarity}')
         print(f'  lambda_loss_weighting={self.args.graph_lambda_loss_weighting}')
         print(f'  lambda_loss_polarity={self.args.graph_lambda_loss_polarity}')
         print(f'  lambda_loss_alpha={self.args.graph_lambda_loss_alpha}')
@@ -209,15 +235,23 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         self.model.eval()
         with torch.no_grad():
             for batch in vali_loader:
-                batch_x, batch_y, batch_x_mark, batch_y_mark, _, batch_regime_x_aux, batch_regime_y_aux, _, _ = self._unpack_batch(batch)
+                batch_x, batch_y, batch_x_mark, batch_y_mark, _, batch_regime_x_aux, batch_regime_y_aux, batch_graph_lambda, batch_graph_delta = self._unpack_batch(batch)
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
 
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark, batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux)
+                        outputs, batch_y = self._forward_batch(
+                            batch_x, batch_y, batch_x_mark, batch_y_mark,
+                            batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux,
+                            batch_graph_lambda=batch_graph_lambda, batch_graph_delta=batch_graph_delta,
+                        )
                 else:
-                    outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark, batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux)
+                    outputs, batch_y = self._forward_batch(
+                        batch_x, batch_y, batch_x_mark, batch_y_mark,
+                        batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux,
+                        batch_graph_lambda=batch_graph_lambda, batch_graph_delta=batch_graph_delta,
+                    )
 
                 pred = outputs.detach().cpu()
                 true = batch_y.detach().cpu()
@@ -342,15 +376,23 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         self.model.eval()
         with torch.no_grad():
             for batch in test_loader:
-                batch_x, batch_y, batch_x_mark, batch_y_mark, _, batch_regime_x_aux, batch_regime_y_aux, _, _ = self._unpack_batch(batch)
+                batch_x, batch_y, batch_x_mark, batch_y_mark, _, batch_regime_x_aux, batch_regime_y_aux, batch_graph_lambda, batch_graph_delta = self._unpack_batch(batch)
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
 
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
-                        outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark, batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux)
+                        outputs, batch_y = self._forward_batch(
+                            batch_x, batch_y, batch_x_mark, batch_y_mark,
+                            batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux,
+                            batch_graph_lambda=batch_graph_lambda, batch_graph_delta=batch_graph_delta,
+                        )
                 else:
-                    outputs, batch_y = self._forward_batch(batch_x, batch_y, batch_x_mark, batch_y_mark, batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux)
+                    outputs, batch_y = self._forward_batch(
+                        batch_x, batch_y, batch_x_mark, batch_y_mark,
+                        batch_regime_x_aux=batch_regime_x_aux, batch_regime_y_aux=batch_regime_y_aux,
+                        batch_graph_lambda=batch_graph_lambda, batch_graph_delta=batch_graph_delta,
+                    )
 
                 outputs = outputs.detach().cpu().numpy()
                 batch_y = batch_y.detach().cpu().numpy()

@@ -50,6 +50,16 @@ def data_provider(args, flag):
         data_kwargs['graph_interface_dir'] = getattr(args, 'graph_interface_dir', '')
         data_kwargs['graph_shuffle_lambda'] = getattr(args, 'graph_shuffle_lambda', False)
         data_kwargs['graph_seed'] = getattr(args, 'seed', 2023)
+        graph_mode = getattr(args, 'graph_mode', 'soft_bias')
+        graph_uses_dynamic = graph_mode in {'soft_bias', 'residual_head'} and getattr(args, 'graph_use_dynamic_bias', False)
+        data_kwargs['graph_require_lambda'] = (
+            graph_uses_dynamic
+            or getattr(args, 'graph_lambda_logit_bias', False)
+            or getattr(args, 'graph_lambda_loss_weighting', False)
+            or getattr(args, 'graph_shuffle_lambda', False)
+        )
+        data_kwargs['graph_require_lambda_eval'] = getattr(args, 'graph_lambda_logit_bias', False)
+        data_kwargs['graph_require_delta'] = graph_uses_dynamic
     if args.data == 'phasec_synth':
         data_kwargs['phasec_split_path'] = args.phasec_split_path
         data_kwargs['phasec_gating_lambda_path'] = getattr(args, 'phasec_gating_lambda_path', '')
