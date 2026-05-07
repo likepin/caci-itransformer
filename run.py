@@ -101,6 +101,7 @@ if __name__ == '__main__':
     # optimization
     parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')
     parser.add_argument('--itr', type=int, default=1, help='experiments times')
+    parser.add_argument('--itr_start', type=int, default=0, help='starting experiment index for appending projections without rerunning earlier itr outputs')
     parser.add_argument('--train_epochs', type=int, default=10, help='train epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='batch size of train input data')
     parser.add_argument('--patience', type=int, default=3, help='early stopping patience')
@@ -201,7 +202,7 @@ if __name__ == '__main__':
 
 
     if args.is_training:
-        for ii in range(args.itr):
+        for ii in range(args.itr_start, args.itr_start + args.itr):
             # setting record of experiments
             setting = '{}_{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(
                 args.model_id,
