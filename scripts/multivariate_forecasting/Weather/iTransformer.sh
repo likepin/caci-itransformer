@@ -135,6 +135,6 @@ python -u run.py \
   --gpu 0 \
   --num_workers 0 \
   --train_epochs 10 \
-  --patience 1 \
+  --patience 3 \
 
 done
